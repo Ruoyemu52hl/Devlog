@@ -106,18 +106,21 @@ if (title) {
 }
 
 let ogImageUrl: string | undefined;
+const toAbsoluteUrl = (assetPath: string): string => {
+	if (/^(https?:)?\/\//.test(assetPath)) {
+		return assetPath;
+	}
+	return new URL(assetPath.startsWith("/") ? url(assetPath) : assetPath, Astro.site).toString();
+};
+
 if (siteConfig.generateOgImages && postSlug) {
-	ogImageUrl = new URL(`/og/${postSlug}.png`, Astro.site).toString();
+	ogImageUrl = toAbsoluteUrl(`/og/${postSlug}.png`);
 } else if (coverImage) {
 	// For post pages with cover images, use the resolved cover image
-	ogImageUrl = coverImage.startsWith("http")
-		? coverImage
-		: new URL(coverImage, Astro.site).toString();
+	ogImageUrl = toAbsoluteUrl(coverImage);
 } else if (banner) {
 	// For others, use the first banner as OG image
-	ogImageUrl = banner.startsWith("http")
-		? banner
-		: new URL(banner, Astro.site).toString();
+	ogImageUrl = toAbsoluteUrl(banner);
 }
 
 // const siteLang = siteConfig.lang.replace('_', '-')

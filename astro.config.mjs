@@ -32,10 +32,13 @@ import { parseDirectiveNode } from "./src/plugins/remark-directive-rehype.js";
 import { remarkFixGithubAdmonitions } from "./src/plugins/remark-fix-github-admonitions.js";
 import { remarkMermaid } from "./src/plugins/remark-mermaid.js";
 
+const site = process.env.SITE_URL ?? siteConfig.siteURL;
+const base = process.env.BASE_PATH ?? "/";
+
 // https://astro.build/config
 export default defineConfig({
-	site: siteConfig.siteURL,
-	base: "/",
+	site,
+	base,
 	trailingSlash: "always",
 
 	output: "static",
