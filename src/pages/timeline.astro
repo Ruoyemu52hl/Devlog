@@ -9,6 +9,7 @@ import { siteConfig } from "../config";
 import { timelineData } from "../data/timeline";
 import I18nKey from "../i18n/i18nKey";
 import { i18n } from "../i18n/translation";
+import { url } from "../utils/url-utils";
 
 if (!siteConfig.featurePages.timeline) {
 	return Astro.redirect("/404/");
@@ -75,7 +76,7 @@ const subtitle = i18n(I18nKey.timelineSubtitle);
 		});
 	</script>
 
-	<script is:inline src="/js/filter-tabs-handler.js"></script>
+	<script is:inline src={url("/js/filter-tabs-handler.js")}></script>
 
 	<div
 		class="flex w-full rounded-[var(--radius-large)] overflow-hidden relative min-h-32"

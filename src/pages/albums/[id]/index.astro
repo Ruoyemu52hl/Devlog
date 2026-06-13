@@ -11,6 +11,7 @@ import I18nKey from "../../../i18n/i18nKey";
 import { i18n } from "../../../i18n/translation";
 import type { AlbumGroup, Photo } from "../../../types/album";
 import { scanAlbums } from "../../../utils/album-scanner";
+import { url } from "../../../utils/url-utils";
 
 if (!siteConfig.featurePages.albums) {
 	return Astro.redirect("/404/");
@@ -35,13 +36,17 @@ if (!album) {
 }
 
 const isEncrypted = !!album.password;
+const withBase = (assetUrl: string) =>
+	assetUrl.startsWith("/") ? url(assetUrl) : assetUrl;
+const albumsUrl = url("/albums/");
+const coverSrc = album.cover ? withBase(album.cover) : "";
 let encryptedPhotoData = "";
 if (isEncrypted) {
 	const photoHtml = album.photos
-		.map(
-			(photo: Photo) =>
-				`<div class="gallery-masonry-item"><a data-fancybox="album-${album.id}" href="${photo.src}" data-caption="${photo.alt || photo.title || ""}"><img src="${photo.src}" alt="${photo.alt || photo.title || ""}" loading="lazy" decoding="async" class="w-full rounded-lg" /></a></div>`,
-		)
+		.map((photo: Photo) => {
+			const photoSrc = withBase(photo.src);
+			return `<div class="gallery-masonry-item"><a data-fancybox="album-${album.id}" href="${photoSrc}" data-caption="${photo.alt || photo.title || ""}"><img src="${photoSrc}" alt="${photo.alt || photo.title || ""}" loading="lazy" decoding="async" class="w-full rounded-lg" /></a></div>`;
+		})
 		.join("");
 	const wrappedHtml = `<div class="gallery-masonry">${photoHtml}</div>`;
 	encryptedPhotoData = encryptContent(
@@ -71,7 +76,7 @@ if (isEncrypted) {
 			album.cover ? (
 				<div class="relative w-full aspect-[3/1] min-h-[200px] max-h-[360px]">
 					<img
-						src={album.cover}
+						src={coverSrc}
 						alt={album.title}
 						class="w-full h-full object-cover"
 					/>
@@ -79,7 +84,7 @@ if (isEncrypted) {
 
 					{/* Back button */}
 					<a
-						href="/albums/"
+						href={albumsUrl}
 						class="absolute top-4 left-4 inline-flex items-center gap-1.5 text-sm text-white/90 hover:text-white bg-black/30 hover:bg-black/50 backdrop-blur-sm px-3 py-1.5 rounded-lg transition-colors"
 					>
 						<Icon
@@ -141,7 +146,7 @@ if (isEncrypted) {
 			) : (
 				<div class="card-base px-6 py-4">
 					<a
-						href="/albums/"
+						href={albumsUrl}
 						class="inline-flex items-center gap-1 text-sm text-(--primary) hover:underline mb-3"
 					>
 						<Icon
