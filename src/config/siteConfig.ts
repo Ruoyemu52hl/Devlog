@@ -75,7 +75,7 @@ export const siteConfig: SiteConfig = {
   postListLayout: {
     // 默认布局模式："list" 列表模式（单列布局），"grid" 网格模式（双列布局）
     // 注意：如果侧边栏配置启用了"both"双侧边栏，则无法使用文章列表"grid"网格（双列）布局
-    defaultMode: "list",
+    defaultMode: "grid",
     // 是否启用布局切换功能
     enable: true,
     // 是否允许用户切换布局
@@ -153,7 +153,6 @@ export const siteConfig: SiteConfig = {
       subtitle: [
         "记录工程实践、问题排查与长期思考",
         "把复杂问题拆开，把解决过程写清楚",
-        "关注前端、后端、工具链与系统设计",
         "用可复现的笔记沉淀技术经验",
         "写给未来的自己，也分享给正在解决问题的人",
       ],
