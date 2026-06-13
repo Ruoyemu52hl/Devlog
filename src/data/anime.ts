@@ -1,0 +1,102 @@
+// 本地番剧数据配置
+export interface AnimeItem {
+	title: string;
+	status: "watching" | "completed" | "planned";
+	rating: number;
+	cover: string;
+	description: string;
+	episodes: string;
+	year: string;
+	genre: string[];
+	studio: string;
+	link: string;
+	progress: number;
+	totalEpisodes: number;
+	startDate: string;
+	endDate: string;
+}
+
+const localAnimeList: AnimeItem[] = [
+	{
+		title: "莉可丽丝",
+		status: "completed",
+		rating: 9.8,
+		cover: "/assets/anime/lkls.webp",
+		description: "少女枪战与日常交织的原创动画",
+		episodes: "12 集",
+		year: "2022",
+		genre: ["动作", "日常"],
+		studio: "A-1 Pictures",
+		link: "https://www.bilibili.com/bangumi/media/md28338623",
+		progress: 12,
+		totalEpisodes: 12,
+		startDate: "2022-07",
+		endDate: "2022-09",
+	},
+	{
+		title: "飙速宅男",
+		status: "watching",
+		rating: 9.5,
+		cover: "/assets/anime/rynh.webp",
+		description: "围绕自行车竞技展开的热血校园故事",
+		episodes: "12 集",
+		year: "2015",
+		genre: ["运动", "校园"],
+		studio: "Nexus",
+		link: "https://www.bilibili.com/bangumi/media/md2590",
+		progress: 8,
+		totalEpisodes: 12,
+		startDate: "2015-07",
+		endDate: "2015-09",
+	},
+	{
+		title: "恋爱小行星",
+		status: "watching",
+		rating: 9.2,
+		cover: "/assets/anime/laxxx.webp",
+		description: "在星空与地学社团中展开的温柔日常",
+		episodes: "12 集",
+		year: "2020",
+		genre: ["日常", "治愈"],
+		studio: "Doga Kobo",
+		link: "https://www.bilibili.com/bangumi/media/md28224128",
+		progress: 5,
+		totalEpisodes: 12,
+		startDate: "2020-01",
+		endDate: "2020-03",
+	},
+	{
+		title: "请问您今天要来点兔子吗？",
+		status: "planned",
+		rating: 9.0,
+		cover: "/assets/anime/tz1.webp",
+		description: "少女们在咖啡店里的温暖日常",
+		episodes: "12 集",
+		year: "2014",
+		genre: ["日常", "治愈"],
+		studio: "White Fox",
+		link: "https://www.bilibili.com/bangumi/media/md2762",
+		progress: 12,
+		totalEpisodes: 12,
+		startDate: "2014-04",
+		endDate: "2014-06",
+	},
+	{
+		title: "魔法少女的秘密",
+		status: "watching",
+		rating: 9.0,
+		cover: "/assets/anime/cmmn.webp",
+		description: "围绕魔法少女展开的轻松故事",
+		episodes: "12 集",
+		year: "2024",
+		genre: ["日常", "治愈", "魔法"],
+		studio: "C2C",
+		link: "https://www.bilibili.com/bangumi/media/md26625039",
+		progress: 8,
+		totalEpisodes: 12,
+		startDate: "2025-07",
+		endDate: "2025-10",
+	},
+];
+
+export default localAnimeList;
