@@ -19,7 +19,7 @@ import MainGridLayout from "@layouts/MainGridLayout.astro";
 import { getRelatedPosts, getSortedPosts } from "@utils/content-utils";
 import { hasCustomPermalink, initPostIdMap } from "@utils/permalink-utils";
 import { getPostPublicDescription } from "@utils/post-card-content";
-import { getFileDirFromPath, removeFileExtension } from "@utils/url-utils";
+import { getFileDirFromPath, removeFileExtension, url } from "@utils/url-utils";
 import {
 	licenseConfig,
 	permalinkConfig,
@@ -152,6 +152,7 @@ if (entry.data.image) {
 		}
 	} else {
 		ogCoverUrl = entry.data.image; // absolute path like "/images/foo.png"
+		posterCoverUrl = url(entry.data.image);
 	}
 }
 
@@ -176,6 +177,8 @@ if (profileConfig.avatar) {
 			const img = await file();
 			posterAvatarUrl = img.src;
 		}
+	} else if (profileConfig.avatar.startsWith("/")) {
+		posterAvatarUrl = url(profileConfig.avatar);
 	}
 }
 

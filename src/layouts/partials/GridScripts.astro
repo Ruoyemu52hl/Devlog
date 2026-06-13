@@ -17,6 +17,8 @@ interface Props {
 	postListLayoutEnabled?: boolean;
 }
 
+import { url } from "../../utils/url-utils";
+
 const {
 	navbarTransparentMode = "semi",
 	defaultWallpaperMode = "banner",
@@ -29,6 +31,7 @@ const {
 	wallpaperEnabled = true,
 	postListLayoutEnabled = true,
 } = Astro.props;
+const homePath = url("/");
 ---
 
 <script
@@ -45,6 +48,7 @@ const {
 		bannerTitleEnabled,
 		wallpaperEnabled,
 		postListLayoutEnabled,
+		homePath,
 	}}
 >
 	function getCarrierNumber(key, fallback) {
@@ -71,7 +75,7 @@ const {
 
 		const isMobile = window.innerWidth < 1280;
 		const isHomePage =
-			window.location.pathname === "/" || window.location.pathname === "";
+			window.location.pathname.replace(/\/$/, "") === homePath.replace(/\/$/, "");
 
 		mainContent.classList.remove("mobile-main-no-banner", "no-banner-layout");
 		mainContent.style.removeProperty("min-height");

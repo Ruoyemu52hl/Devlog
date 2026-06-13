@@ -2,6 +2,7 @@
  * 导航工具函数
  * 提供统一的页面导航功能，支持 Swup 无刷新跳转
  */
+import { url as withSiteBase } from "./url-utils";
 
 /**
  * 导航到指定页面
@@ -250,7 +251,7 @@ export function getCurrentPath(): string {
  */
 export function isHomePage(): boolean {
 	const path = getCurrentPath();
-	return path === "/" || path === "";
+	return pathsEqual(path, withSiteBase("/"));
 }
 
 /**
@@ -258,7 +259,8 @@ export function isHomePage(): boolean {
  */
 export function isPostPage(): boolean {
 	const path = getCurrentPath();
-	return path.startsWith("/posts/");
+	const postRoot = withSiteBase("/posts/").replace(/\/$/, "");
+	return path === postRoot || path.startsWith(`${postRoot}/`);
 }
 
 /**

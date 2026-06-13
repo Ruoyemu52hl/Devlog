@@ -1,5 +1,6 @@
 <script lang="ts">
 import Icon from "@iconify/svelte";
+import { withBasePath } from "@utils/url-utils";
 
 import type { Song } from "../../music-player/types";
 
@@ -16,10 +17,7 @@ function getAssetPath(path: string): string {
 	if (path.startsWith("http://") || path.startsWith("https://")) {
 		return path;
 	}
-	if (path.startsWith("/")) {
-		return path;
-	}
-	return `/${path}`;
+	return withBasePath(path);
 }
 </script>
 

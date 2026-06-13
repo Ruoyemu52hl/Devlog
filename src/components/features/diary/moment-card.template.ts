@@ -2,6 +2,7 @@
 // 参考: DIARY_MEMOS_SETUP.md
 
 import type { DiaryItem } from "../../../data/diary";
+import { withBasePath } from "../../../utils/url-utils";
 
 // --- Memos API 响应类型 ---
 
@@ -143,14 +144,15 @@ function renderMomentCard(
 	if (moment.images && moment.images.length > 0) {
 		const layoutClass = getImageLayoutClass(moment.images.length);
 		const imgs = moment.images
-			.map(
-				(img, i) => `
+			.map((img, i) => {
+				const imageSrc = withBasePath(img);
+				return `
 				<div class="relative rounded-lg overflow-hidden aspect-square cursor-pointer">
-					<a href="javascript:void(0)" data-src="${escapeHtml(img)}" data-fancybox="diary-${index}-${i}" class="block w-full h-full">
-						<img src="${escapeHtml(img)}" alt="diary moment image" class="w-full h-full object-cover transition-transform duration-300 hover:scale-105" loading="lazy" decoding="async" />
+					<a href="javascript:void(0)" data-src="${escapeHtml(imageSrc)}" data-fancybox="diary-${index}-${i}" class="block w-full h-full">
+						<img src="${escapeHtml(imageSrc)}" alt="diary moment image" class="w-full h-full object-cover transition-transform duration-300 hover:scale-105" loading="lazy" decoding="async" />
 					</a>
-				</div>`,
-			)
+				</div>`;
+			})
 			.join("");
 		imagesHtml = `<div class="diary-images grid gap-2 mb-3 ${layoutClass}">${imgs}</div>`;
 	}

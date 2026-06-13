@@ -1,4 +1,6 @@
 ---
+import { withBasePath } from "../../utils/url-utils";
+
 /**
  * ButtonLink - 分类列表按钮组件
  *
@@ -13,9 +15,10 @@ interface Props {
 	label?: string;
 }
 const { badge, url, label } = Astro.props;
+const href = url ? withBasePath(url) : undefined;
 ---
 
-<a href={url} aria-label={label}>
+<a href={href} aria-label={label}>
 	<button
 		class:list={`
             w-full

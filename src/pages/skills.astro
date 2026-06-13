@@ -12,7 +12,7 @@ import { i18n } from "../i18n/translation";
 import { url } from "../utils/url-utils";
 
 if (!siteConfig.featurePages.skills) {
-	return Astro.redirect("/404/");
+	return Astro.redirect(url("/404/"));
 }
 
 const categories = [...new Set(skillsData.map((skill) => skill.category))];

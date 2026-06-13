@@ -1,6 +1,7 @@
 ---
 import { siteConfig } from "../../config";
 import type { FullscreenWallpaperConfig } from "../../types/config";
+import { withBasePath } from "../../utils/url-utils";
 
 interface Props {
 	config: FullscreenWallpaperConfig;
@@ -28,7 +29,9 @@ const getImageSources = async () => {
 	}
 
 	const toArray = (src: string | string[] | undefined): string[] =>
-		Array.isArray(src) ? src : typeof src === "string" ? [src] : [];
+		(Array.isArray(src) ? src : typeof src === "string" ? [src] : []).map(
+			(item) => withBasePath(item),
+		);
 
 	if (
 		typeof srcConfig === "object" &&

@@ -1,4 +1,5 @@
 <script lang="ts">
+import { url } from "@utils/url-utils";
 import type { CalendarPost } from "../types/calendar";
 
 interface Props {
@@ -8,6 +9,7 @@ interface Props {
 }
 
 const { posts, currentPostId, isEmpty }: Props = $props();
+const getPostUrl = (postId: string) => url(`/posts/${postId}/`);
 
 function formatDate(dateStr: string): string {
 	const [, m, d] = dateStr.split("-");
@@ -51,7 +53,7 @@ function getDateClass(isCurrentPost: boolean): string {
 			{#each posts as post (post.id)}
 				{@const isCurrentPost = post.id === currentPostId}
 				<a
-					href="/posts/{post.id}/"
+					href={getPostUrl(post.id)}
 					class={getContainerClass(isCurrentPost)}
 				>
 					<span class={getTitleClass(isCurrentPost)}

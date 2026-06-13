@@ -11,6 +11,7 @@ import { Icon } from "astro-icon/components";
 import { siteConfig } from "../../config";
 import { BANNER_HEIGHT_EXTEND } from "../../constants/constants";
 import { getImageFormats, getImageQuality } from "../../utils/image-utils";
+import { withBasePath } from "../../utils/url-utils";
 
 interface Props {
 	// Banner 配置
@@ -48,6 +49,12 @@ const normalizeToArray = (images: string | string[]): string[] =>
 
 const desktopImages = normalizeToArray(bannerImages.desktop).filter(Boolean);
 const mobileImages = normalizeToArray(bannerImages.mobile).filter(Boolean);
+const resolveImageConfig = (images: string | string[]): string | string[] =>
+	Array.isArray(images)
+		? images.map((src) => withBasePath(src))
+		: withBasePath(images);
+const desktopImagesForScript = resolveImageConfig(bannerImages.desktop);
+const mobileImagesForScript = resolveImageConfig(bannerImages.mobile);
 
 const isCarouselEnabled =
 	siteConfig.banner.carousel?.enable &&
@@ -166,8 +173,8 @@ const bannerFormats = getImageFormats();
 			<script
 				is:inline
 				define:vars={{
-					desktopImages: bannerImages.desktop,
-					mobileImages: bannerImages.mobile,
+					desktopImages: desktopImagesForScript,
+					mobileImages: mobileImagesForScript,
 					position: siteConfig.banner.position,
 				}}
 			>

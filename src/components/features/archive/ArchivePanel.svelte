@@ -1,6 +1,7 @@
 <script lang="ts">
 import I18nKey from "@i18n/i18nKey";
 import { i18n } from "@i18n/translation";
+import { url } from "@utils/url-utils";
 import { onMount } from "svelte";
 
 export let tags: string[];
@@ -40,6 +41,10 @@ function formatDate(date: Date) {
 
 function formatTag(tagList: string[]) {
 	return tagList.map((t) => `#${t}`).join(" ");
+}
+
+function getPostUrl(post: Post): string {
+	return post.url || url(`/posts/${post.id}/`);
 }
 
 onMount(async () => {
@@ -118,7 +123,7 @@ onMount(async () => {
 
 			{#each group.posts as post}
 				<a
-					href={post.url || `/posts/${post.id}/`}
+					href={getPostUrl(post)}
 					aria-label={post.data.title}
 					class="group btn-plain !block h-10 w-full rounded-lg hover:text-[initial]"
 				>

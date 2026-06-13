@@ -18,7 +18,7 @@ const className = Astro.props.class;
 const navbarTransparentMode =
 	siteConfig.banner?.navbar?.transparentMode || "semi";
 
-const isHomePage = Astro.url.pathname === "/" || Astro.url.pathname === "";
+const isHomePage = Astro.url.pathname.replace(/\/$/, "") === url("/").replace(/\/$/, "");
 
 // featurePage URL -> config key mapping
 const featurePageUrlMap: Record<string, string> = {

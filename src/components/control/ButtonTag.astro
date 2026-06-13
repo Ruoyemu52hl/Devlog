@@ -1,4 +1,6 @@
 ---
+import { withBasePath } from "../../utils/url-utils";
+
 /**
  * ButtonTag - 标签按钮组件
  *
@@ -12,10 +14,11 @@ interface ButtonTagProps {
 	label?: string;
 }
 const { dot, href, label }: ButtonTagProps = Astro.props;
+const resolvedHref = href ? withBasePath(href) : undefined;
 ---
 
 <a
-	href={href}
+	href={resolvedHref}
 	aria-label={label}
 	class="btn-regular h-8 text-sm px-3 rounded-lg"
 >

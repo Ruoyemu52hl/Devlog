@@ -24,6 +24,7 @@ import {
 	getTransparencyClass,
 	shouldEnableTransparency,
 } from "../utils/grid-layout-utils";
+import { pathsEqual, url } from "../utils/url-utils";
 import { widgetManager } from "../utils/widget-manager";
 import Layout from "./Layout.astro";
 import GridScripts from "./partials/GridScripts.astro";
@@ -62,7 +63,7 @@ const hasBannerCredit = siteConfig.banner.credit.enable;
 const hasBannerLink = !!siteConfig.banner.credit.url;
 
 // 检查是否为首页
-const isHomePage = Astro.url.pathname === "/" || Astro.url.pathname === "";
+const isHomePage = pathsEqual(Astro.url.pathname, url("/"));
 // 手机端非首页不显示banner的CSS类
 const mobileNonHomeBannerClass = !isHomePage ? "mobile-hide-banner" : "";
 

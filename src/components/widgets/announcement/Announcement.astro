@@ -4,6 +4,7 @@ import { Icon } from "astro-icon/components";
 import { announcementConfig } from "../../../config";
 import I18nKey from "../../../i18n/i18nKey";
 import { i18n } from "../../../i18n/translation";
+import { withBasePath } from "../../../utils/url-utils";
 import WidgetLayout from "../common/WidgetLayout.astro";
 
 const config = announcementConfig;
@@ -14,6 +15,11 @@ interface Props {
 }
 const className = Astro.props.class;
 const style = Astro.props.style;
+const linkUrl = config.link?.external
+	? config.link.url
+	: config.link?.url
+		? withBasePath(config.link.url)
+		: "";
 ---
 
 <!-- 组件显示现在由sidebarLayoutConfig统一控制，无需检查config.enable -->
@@ -37,7 +43,7 @@ const style = Astro.props.style;
 				{
 					config.link && config.link.enable !== false && (
 						<a
-							href={config.link.url}
+							href={linkUrl}
 							target={config.link.external ? "_blank" : "_self"}
 							rel={
 								config.link.external

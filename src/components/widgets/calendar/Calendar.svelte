@@ -1,5 +1,6 @@
 <script lang="ts">
 import Icon from "@iconify/svelte";
+import { url } from "@utils/url-utils";
 import { onMount } from "svelte";
 
 let dateCheckInterval: ReturnType<typeof setInterval> | null = null;
@@ -35,6 +36,8 @@ interface Props {
 }
 
 const { monthNames, weekDays, yearSuffix }: Props = $props();
+const calendarDataUrl = url("/api/calendar-data.json");
+const getPostUrl = (postId: string) => url(`/posts/${postId}/`);
 
 // State
 let allPostsData: CalendarPost[] = $state([]);
@@ -112,7 +115,7 @@ const displayedPosts = $derived(
 // Functions
 async function fetchCalendarData() {
 	try {
-		const res = await fetch("/api/calendar-data.json");
+		const res = await fetch(calendarDataUrl);
 		const data = await res.json();
 		if (Array.isArray(data)) {
 			allPostsData = data;
@@ -315,7 +318,7 @@ onMount(() => {
 						{@const [, m, d] = post.date.split("-")}
 						{@const dateStr = `${parseInt(m)}-${parseInt(d)}`}
 						<a
-							href="/posts/{post.id}/"
+							href={getPostUrl(post.id)}
 							class="flex items-center justify-between text-sm transition-colors px-2 py-2 rounded-lg group border border-transparent
 								{isCurrentPost
 								? 'bg-[var(--primary)]/10 text-[var(--primary)] border-[var(--primary)]/10'

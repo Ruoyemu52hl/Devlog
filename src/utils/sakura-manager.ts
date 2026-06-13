@@ -1,4 +1,5 @@
 import type { SakuraConfig } from "../types/config";
+import { url } from "./url-utils";
 
 // 樱花对象类
 class Sakura {
@@ -210,7 +211,7 @@ export class SakuraManager {
 
 		// 创建图片对象
 		this.img = new Image();
-		this.img.src = "/sakura.webp"; // 使用樱花图片
+		this.img.src = url("/sakura.webp"); // 使用樱花图片
 
 		// 等待图片加载完成
 		await new Promise<void>((resolve, reject) => {

@@ -44,6 +44,23 @@ const keywords = siteConfig.keywords;
 // Favicons
 const favicons: Favicon[] =
 	siteConfig.favicon.length > 0 ? siteConfig.favicon : defaultFavicons;
+
+const customFontFaceCss = `
+@font-face {
+  font-family: "ZenMaruGothic-Medium";
+  src: url("${url("/assets/font/ZenMaruGothic-Medium.ttf")}") format("truetype");
+  font-weight: 500;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "萝莉体 第二版";
+  src: url("${url("/assets/font/loli.ttf")}") format("truetype");
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+`;
 ---
 
 <!-- SEO Meta Tags -->
@@ -96,6 +113,7 @@ const favicons: Favicon[] =
 
 <!-- 字体通过构建脚本压缩到 /assets/font/ 目录，此处不再预加载以避免 404 -->
 <!-- 字体在构建时通过 scripts/compress-fonts.js 处理并复制到 dist/ -->
+<style set:html={customFontFaceCss}></style>
 
 <!-- 预连接 Iconify API 以减少图标加载延迟 -->
 <link rel="preconnect" href="https://api.iconify.design" crossorigin />

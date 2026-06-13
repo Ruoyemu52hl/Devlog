@@ -1,5 +1,6 @@
 ---
 import type { Device } from "../../../data/devices";
+import { withBasePath } from "../../../utils/url-utils";
 
 interface Props {
 	device: Device;
@@ -8,6 +9,7 @@ interface Props {
 }
 
 const { device, index, viewDetailsText } = Astro.props;
+const deviceImageSrc = withBasePath(device.image);
 ---
 
 <a
@@ -27,7 +29,7 @@ const { device, index, viewDetailsText } = Astro.props;
 			>
 			</div>
 			<img
-				src={device.image}
+				src={deviceImageSrc}
 				alt={device.name}
 				class="w-auto h-full max-h-full object-contain group-hover:scale-110 transition-all duration-500 drop-shadow-md relative z-10"
 				loading="lazy"

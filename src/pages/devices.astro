@@ -6,18 +6,28 @@ import { devicesData } from "../data/devices";
 import I18nKey from "../i18n/i18nKey";
 import { i18n } from "../i18n/translation";
 import MainGridLayout from "../layouts/MainGridLayout.astro";
+import { url, withBasePath } from "../utils/url-utils";
 
 export const prerender = true;
 
 // 检查设备页面是否启用
 if (!siteConfig.featurePages.devices) {
-	return Astro.redirect("/404/");
+	return Astro.redirect(url("/404/"));
 }
 
 // 设备数据
 const devices = devicesData;
 const brands = Object.keys(devices);
 const viewDetailsText = i18n(I18nKey.devicesViewDetails);
+const devicesForClient = Object.fromEntries(
+	Object.entries(devices).map(([brand, brandDevices]) => [
+		brand,
+		brandDevices.map((device) => ({
+			...device,
+			image: withBasePath(device.image),
+		})),
+	]),
+);
 ---
 
 <MainGridLayout title={i18n(I18nKey.devices)}>
@@ -81,7 +91,7 @@ const viewDetailsText = i18n(I18nKey.devicesViewDetails);
 				is:inline
 				id="devices-data"
 				type="application/json"
-				set:html={JSON.stringify(devices)}
+				set:html={JSON.stringify(devicesForClient)}
 			/>
 			<script
 				is:inline
@@ -93,7 +103,7 @@ const viewDetailsText = i18n(I18nKey.devicesViewDetails);
 	</div>
 
 	<!-- 使用全局脚本，确保 swup 切换后仍能重新初始化 -->
-	<script is:inline src="/js/devices-page-handler.js"></script>
+	<script is:inline src={url("/js/devices-page-handler.js")}></script>
 </MainGridLayout>
 
 <style>

@@ -12,7 +12,7 @@ import { scanAlbums } from "../utils/album-scanner";
 import { url } from "../utils/url-utils";
 
 if (!siteConfig.featurePages.albums) {
-	return Astro.redirect("/404/");
+	return Astro.redirect(url("/404/"));
 }
 
 const albumsData = await scanAlbums();

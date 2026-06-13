@@ -3,6 +3,7 @@ import { Icon } from "astro-icon/components";
 
 import I18nKey from "../../../i18n/i18nKey";
 import { i18n } from "../../../i18n/translation";
+import { withBasePath } from "../../../utils/url-utils";
 import type { TimelineCardProps } from "./types";
 
 const { item } = Astro.props as TimelineCardProps;
@@ -224,7 +225,7 @@ const hasLinks = item.links && item.links.length > 0;
 					<div class="flex flex-wrap gap-2 mt-3">
 						{item.links!.map((link) => (
 							<a
-								href={link.url}
+								href={withBasePath(link.url)}
 								target="_blank"
 								rel="noopener noreferrer"
 								class="btn-regular flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium"

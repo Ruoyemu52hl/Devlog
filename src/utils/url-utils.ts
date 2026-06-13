@@ -97,5 +97,26 @@ export function getFileDirFromPath(filePath: string): string {
 }
 
 export function url(path: string) {
-	return joinUrl("", import.meta.env.BASE_URL, path);
+	const basePath = import.meta.env.BASE_URL;
+	if (
+		basePath !== "/" &&
+		(path === basePath || path.startsWith(basePath))
+	) {
+		return path;
+	}
+	return joinUrl("", basePath, path);
+}
+
+export function withBasePath(path: string): string {
+	if (!path) {
+		return path;
+	}
+	if (
+		/^(?:[a-z][a-z\d+\-.]*:)?\/\//i.test(path) ||
+		/^(data|blob|mailto|tel):/i.test(path) ||
+		path.startsWith("#")
+	) {
+		return path;
+	}
+	return url(path.startsWith("/") ? path : `/${path}`);
 }
