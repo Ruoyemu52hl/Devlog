@@ -168,6 +168,17 @@ Mizuki 基于 [Fuwari](https://github.com/saicaca/fuwari) 开发，Fuwari 使用
 
 - **环境变量配置（可选）：** 可参照 `.env.example` 来配置
 
+#### 部署路径与 `BASE_PATH`
+
+本项目已经对主要页面链接和静态资源路径做了 `BASE_PATH` 适配，但静态站点无法在运行时自动猜测实际部署目录。部署地址变化时，需要让构建配置和最终访问路径保持一致：
+
+- 仅移动本地项目文件夹，例如从 `D:\Projects\Mizuki-master` 换到其它目录，不需要修改部署路径配置。
+- 部署到 GitHub Pages 项目站点时，例如访问地址是 `https://用户名.github.io/仓库名/`，应设置 `SITE_URL=https://用户名.github.io/仓库名/`，并设置 `BASE_PATH=/仓库名`。
+- 部署到自定义域名根目录时，例如 `https://example.com/`，应设置 `SITE_URL=https://example.com/`，并设置 `BASE_PATH=/`。
+- 如果构建时仍使用 `/Devlog`，但实际访问路径变成 `/Blog` 或域名根目录，页面资源仍可能 404。
+
+后续新增代码时，避免直接硬编码 `href="/..."`、`src="/..."`、`fetch("/...")` 或 CSS `url("/...")`。项目代码中应优先使用 `url("/xxx")` 或 `withBasePath(...)` 生成站内路径；外链、锚点和 `data:` 资源不需要处理。
+
 部署前，请在 `src/config.ts` 中更新 `siteURL`。
 **不建议**将 `.env` 文件提交到 Git，`.env` 应该仅在本地调试或构建使用。若要将项目在云平台部署，建议通过平台上的 `环境变量` 配置传入。
 

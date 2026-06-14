@@ -165,6 +165,17 @@ Mizuki 基於 [Fuwari](https://github.com/saicaca/fuwari) 開發，Fuwari 使用
 - **GitHub Pages：** 使用包含的 GitHub Actions 工作流
 - **Cloudflare Pages：** 連接您的儲存庫
 
+#### 部署路徑與 `BASE_PATH`
+
+本專案已經對主要頁面連結和靜態資源路徑做了 `BASE_PATH` 適配，但靜態網站無法在執行時自動判斷實際部署目錄。部署網址變更時，需要讓構建配置和最終訪問路徑保持一致：
+
+- 僅移動本地專案資料夾，例如從 `D:\Projects\Mizuki-master` 換到其他目錄，不需要修改部署路徑配置。
+- 部署到 GitHub Pages 專案站點時，例如訪問地址是 `https://使用者名稱.github.io/儲存庫名/`，應設定 `SITE_URL=https://使用者名稱.github.io/儲存庫名/`，並設定 `BASE_PATH=/儲存庫名`。
+- 部署到自訂網域根目錄時，例如 `https://example.com/`，應設定 `SITE_URL=https://example.com/`，並設定 `BASE_PATH=/`。
+- 如果構建時仍使用 `/Devlog`，但實際訪問路徑變成 `/Blog` 或網域根目錄，頁面資源仍可能 404。
+
+後續新增程式碼時，避免直接硬編碼 `href="/..."`、`src="/..."`、`fetch("/...")` 或 CSS `url("/...")`。專案程式碼中應優先使用 `url("/xxx")` 或 `withBasePath(...)` 產生站內路徑；外部連結、錨點和 `data:` 資源不需要處理。
+
 部署前，請在 `src/config.ts` 中更新 `siteURL`。
 
 - **環境變數配置（可選）：** 可參照 `.env.example` 來配置

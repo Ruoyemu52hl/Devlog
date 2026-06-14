@@ -167,6 +167,17 @@ Deploy your blog to any static hosting platform:
 
 - **Environment Variable Configuration (Optional):** Refer to `.env.example` for configuration
 
+#### Deployment Path and `BASE_PATH`
+
+This project already adapts the main page links and static asset paths with `BASE_PATH`, but a static site cannot automatically detect its deployed directory at runtime. When the deployment URL changes, keep the build configuration consistent with the final access path:
+
+- Moving the local project folder, such as from `D:\Projects\Mizuki-master` to another directory, does not require deployment path changes.
+- When deploying to a GitHub Pages project site, such as `https://username.github.io/repository-name/`, set `SITE_URL=https://username.github.io/repository-name/` and `BASE_PATH=/repository-name`.
+- When deploying to the root of a custom domain, such as `https://example.com/`, set `SITE_URL=https://example.com/` and `BASE_PATH=/`.
+- If the build still uses `/Devlog` but the actual access path changes to `/Blog` or a domain root, page assets may still return 404.
+
+When adding code later, avoid hardcoding `href="/..."`, `src="/..."`, `fetch("/...")`, or CSS `url("/...")`. Prefer `url("/xxx")` or `withBasePath(...)` for internal paths. External links, anchors, and `data:` resources do not need this handling.
+
 Before deployment, update the `siteURL` in `src/config.ts`.
 **Not recommended** to commit the `.env` file to Git. The `.env` file should only be used for local debugging or building. For cloud platform deployment, it's recommended to configure via the platform's `environment variables` settings.
 

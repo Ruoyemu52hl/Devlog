@@ -165,6 +165,17 @@ This customized version includes Chinese localization, layout adjustments, featu
 - **GitHub Pages：** 付属のGitHub Actionsワークフローを使用
 - **Cloudflare Pages：** リポジトリを接続
 
+#### デプロイパスと `BASE_PATH`
+
+このプロジェクトでは主要なページリンクと静的アセットのパスを `BASE_PATH` に対応させていますが、静的サイトは実行時に実際のデプロイ先ディレクトリを自動判定できません。デプロイ先URLが変わる場合は、ビルド設定と最終的なアクセスパスを一致させてください：
+
+- ローカルのプロジェクトフォルダを、たとえば `D:\Projects\Mizuki-master` から別の場所へ移動するだけなら、デプロイパス設定を変更する必要はありません。
+- GitHub Pages のプロジェクトサイトへデプロイする場合、たとえば `https://ユーザー名.github.io/リポジトリ名/` でアクセスするなら、`SITE_URL=https://ユーザー名.github.io/リポジトリ名/` と `BASE_PATH=/リポジトリ名` を設定してください。
+- カスタムドメインのルートへデプロイする場合、たとえば `https://example.com/` なら、`SITE_URL=https://example.com/` と `BASE_PATH=/` を設定してください。
+- ビルド時に `/Devlog` を使ったまま、実際のアクセスパスが `/Blog` やドメインルートに変わると、ページ内のアセットが 404 になる可能性があります。
+
+今後コードを追加するときは、`href="/..."`、`src="/..."`、`fetch("/...")`、CSS の `url("/...")` を直接ハードコードしないでください。内部パスには `url("/xxx")` または `withBasePath(...)` を優先して使います。外部リンク、アンカー、`data:` リソースはこの処理は不要です。
+
 デプロイ前に、`src/config.ts`の`siteURL`を更新してください。
 
 - **環境変数設定（オプション）：** `.env.example`を参照して設定してください
