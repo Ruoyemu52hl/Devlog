@@ -1,9 +1,11 @@
 import sitemap from "@astrojs/sitemap";
 import mdx from '@astrojs/mdx';
 import { unified } from '@astrojs/markdown-remark';
+import react from "@astrojs/react";
 import svelte, { vitePreprocess } from "@astrojs/svelte";
 import { pluginCollapsibleSections } from "@expressive-code/plugin-collapsible-sections";
 import { pluginLineNumbers } from "@expressive-code/plugin-line-numbers";
+import keystatic from "@keystatic/astro";
 import swup from "@swup/astro";
 import tailwindcss from "@tailwindcss/vite";
 import { defineConfig } from "astro/config";
@@ -34,12 +36,13 @@ import { remarkMermaid } from "./src/plugins/remark-mermaid.js";
 
 const site = process.env.SITE_URL ?? siteConfig.siteURL;
 const base = process.env.BASE_PATH ?? "/";
+const isDev = process.env.NODE_ENV === "development";
 
 // https://astro.build/config
 export default defineConfig({
 	site,
 	base,
-	trailingSlash: "always",
+	trailingSlash: isDev ? "ignore" : "always",
 
 	output: "static",
 
@@ -52,6 +55,7 @@ export default defineConfig({
 	},
 
 	integrations: [
+		...(isDev ? [react(), keystatic()] : []),
 		oddmisc({
 			umami: {
 				shareUrl: false,
