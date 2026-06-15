@@ -10,6 +10,7 @@ hideHomeContent: true
 alias: "encrypted-example"
 tags: ["测试", "加密"]
 category: "示例"
+draft: true
 ---
 
 这个博客模板基于 [Astro](https://astro.build/) 构建。未在本文说明的内容，可以参考 [Astro 文档](https://docs.astro.build/)。
