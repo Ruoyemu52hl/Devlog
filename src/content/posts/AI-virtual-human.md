@@ -88,6 +88,57 @@ flowchart LR
     S --> T[Unity 同步关系状态]
 ```
 
+## Unity 与后端的协议边界
+
+这条链路能保持可维护，前提不是 Unity 和后端“都支持流式”，而是两边对每一种事件的责任和顺序有明确约定。后端只负责生成**可执行的表现事件**，不需要知道 Unity 场景中 Animator 的层级、骨骼名称或材质参数；Unity 只负责把事件转换为声音和角色表现，不在客户端重复实现 Prompt、记忆或关系判定。
+
+一次请求使用 `POST /api/v1/chat/stream`，请求体包含玩家输入和 Unity 在本地采样的 `spatial_state`。响应是 `text/event-stream`，每个 SSE 事件的有效载荷都是一行 JSON。Unity 当前消费四类核心包：
+
+| 事件类型         | 发送时机                          | Unity 的处理                                       | 关键字段                                                         |
+| ---------------- | --------------------------------- | -------------------------------------------------- | ---------------------------------------------------------------- |
+| `sentence_start` | 某句话的第一段可播放 PCM 已到达   | 创建该句流式缓冲、入播放队列，并立刻接收首个音频块 | `index`、`text`、`format`、`sample_rate`、`channels`、表现标签   |
+| `audio_chunk`    | 同一句后续 PCM 到达               | 解码 Base64，追加到该句的音频样本队列              | `index`、`chunk_index`、`audio_base64`、`is_final`               |
+| `sentence`       | 完整句音频或兼容旧协议的 WAV 到达 | 普通队列播放；若同索引流已开始，则作为 WAV 回退    | `text`、`audio_base64`、`expression`、`body_action`              |
+| `dialogue_state` | 后端完成本轮关系计算              | 同步好感度、关系阶段、态度和连续互动状态           | `affection_value`、`relationship_stage`、`relationship_attitude` |
+
+`index` 是这套协议最重要的关联键：`sentence_start`、多个 `audio_chunk` 和可选的 `sentence` 回退包必须使用同一个索引。Unity 的播放层以它维护独立缓冲，因此后端不能在一轮请求内重复索引，也不能将不同句子的音频块交错到错误索引。
+
+```mermaid
+sequenceDiagram
+    participant Player as 玩家
+    participant Sensor as SpatialPerceptionSensor
+    participant Unity as PythonSSEChatService
+    participant API as FastAPI
+    participant PlayerCtl as DialoguePlaybackController
+    participant Character as CharacterPerformanceController
+
+    Player->>Sensor: 移动、注视、输入文本
+    Sensor-->>Unity: SpatialStateData 快照
+    Unity->>API: POST chat/stream
+    API-->>Unity: sentence_start(index=1 + 首段 PCM)
+    Unity-->>PlayerCtl: OnSentenceStreamStarted / OnAudioChunkReceived
+    PlayerCtl-->>Character: OnSentenceStarted
+    Character-->>Character: 表情、动作、脸部特效、口型
+    API-->>Unity: audio_chunk × N
+    Unity-->>PlayerCtl: 继续追加 PCM
+    API-->>Unity: dialogue_state
+    Unity-->>PlayerCtl: OnDialogueStateReceived
+    PlayerCtl-->>Character: 对话结束后的表现策略
+```
+
+这里的时序有两个约束：第一，`sentence_start` 的表现标签必须已经完整，因为 Unity 在真正开始播音频时就会据此驱动角色；第二，`dialogue_state` 可以在所有句子完成后再到达，因为它影响的是本轮结束后的关系同步和后续空间反应，不应阻塞首句开口。
+
+## 首句延迟不是单一模块的指标
+
+“后端是流式”并不自动意味着角色能快速开口。玩家实际感知到的首句延迟，大致由下面几段组成：
+
+```text
+空间状态采样 + HTTP 连接/请求 + 记忆检索 + LLM 首个完整句子
++ TTS 首段 PCM + SSE 传输 + Unity 起播缓冲
+```
+
+本项目把优化责任拆开处理：后端尽快产出首句和首段 PCM；SSE 不等待整句音频；Unity 只保留很短的起播缓冲，随后通过低水位暂停和恢复水位续播来抵抗网络抖动。这样即使后续音频还在生成，角色也能先开始说话。Unity 端具体如何实现这套缓冲与恢复机制，会在后面的 Unity 篇展开。
+
 从体验上看，玩家只是在和角色说一句话；但系统内部实际跑过了空间感知、记忆召回、LLM 生成、TTS 流式合成、PCM 解码、SSE 推送、Unity 音频缓冲和角色表现驱动这一整条链路。
 
 虽然项目没有采用端到端架构，但我通过优化后端链路和流式处理流程，将首句延迟控制在两秒左右，并且没有明显牺牲回复质量。
@@ -283,6 +334,38 @@ POST /api/v1/chat/stream
 
 真正的逻辑放在 `process_chat_stream()` 里。这样设计的好处是 API 层很薄，复杂的业务流程都集中在 service 层，后续要调试性能、替换模型或调整协议时，不需要改路由代码。
 
+下面是实际的 SSE 入口。路由层只负责把 Pydantic 请求模型转换成普通字典，再把异步生成器交给 FastAPI；它不承担 Prompt、TTS 或关系计算。
+
+```python
+# api/chat_router.py
+from fastapi import APIRouter
+from fastapi.responses import StreamingResponse
+
+from models.schemas import ChatRequest
+from services.dialogue_stream_service import process_chat_stream
+
+
+router = APIRouter()
+
+
+@router.post("/api/v1/chat/stream")
+async def chat_endpoint(request: ChatRequest):
+    spatial_state = (
+        request.spatial_state.model_dump()
+        if request.spatial_state is not None
+        else None
+    )
+
+    return StreamingResponse(
+        process_chat_stream(
+            request.user_id,
+            request.message,
+            spatial_state=spatial_state,
+        ),
+        media_type="text/event-stream",
+    )
+```
+
 ## Prompt 设计：让 LLM 输出可执行的事件流
 
 这个项目里的 Prompt 不是简单要求模型“生成一段回复”，而是要求模型输出一组后端可以直接解析和调度的 JSONL 事件。也就是说，LLM 的输出不是最终展示文本，而是后端实时对话流水线的上游事件。
@@ -319,7 +402,7 @@ Prompt 里会要求它包含这些字段：
     "vol": 1.0,
     "pitch": 0
   }
-
+}
 ```
 
 其中几个字段的约束比较关键：
@@ -337,6 +420,55 @@ Prompt 里会要求它包含这些字段：
 我没有让模型直接输出 Unity 的表情名或动作名，而是让它只输出 `emotion` 和 `intensity`。后端再根据情绪稳定映射到 `expression`、`body_action` 和 `face_effect`。
 
 这样做的好处是，模型只需要判断“这句话是什么情绪”，不用知道 Unity 里有哪些动画资源。后面部分会具体讲解为什么这样做。
+
+`process_chat_stream()` 消费到一行合法的 `sentence_fast` 后，会立即冻结该句的文本、TTS 参数与表现映射，并创建独立 TTS 任务。这样后续的 `affection_evaluation` 不会阻塞首句开始合成。
+
+```python
+# services/dialogue_stream_service.py（process_chat_stream 内）
+elif event_type == "sentence_fast":
+    index = int(event["index"])
+    if index in sentences and sentences[index].get("tts_task"):
+        print(f"[FAST JSONL警告] 重复 sentence_fast，已忽略 | index={index}")
+    else:
+        has_any_sentence = True
+        performance = map_emotion_to_performance(
+            emotion=event.get("emotion", "neutral"),
+            intensity=event.get("intensity", 0.35),
+            relationship_state=relationship_state,
+            user_message=user_message,
+        )
+        sentences[index] = {
+            "index": index,
+            "text": event["text"],
+            "tts": event.get("tts", {}),
+            "emotion": event.get("emotion", "neutral"),
+            "intensity": event.get("intensity", 0.35),
+            "performance": performance,
+            "created_at": time.monotonic(),
+            "audio_chunks": {},
+            "stream_started": False,
+            "next_chunk_to_emit": 1,
+            "legacy_sent": False,
+            "audio_done": False,
+            "audio_done_at": None,
+            "audio_base64": "",
+            "sent": False,
+        }
+
+        task = asyncio.create_task(
+            tts_worker(
+                client=client,
+                index=index,
+                text=event["text"],
+                tts=event.get("tts", {}),
+                request_start=request_start,
+                tts_queue=tts_queue,
+            )
+        )
+        sentences[index]["tts_task"] = task
+        tts_tasks.append(task)
+        tts_pending_count += 1
+```
 
 ### 情绪词的定义
 
@@ -472,19 +604,107 @@ sentence_fast
 
 LLM 只负责输出 `emotion` 和 `intensity`，不直接决定 Unity 里的具体动画资源。后端会把情绪映射成稳定的表现标签：
 
-| emotion  | expression | body_action  | face_effect |
-| -------- | ---------- | ------------ | ----------- |
-| neutral  | Default    | None         | none        |
-| soft     | Soft       | SoftTalk     | none        |
-| happy    | Happy      | HappyGesture | none        |
-| shy      | Shy        | ShyGesture   | blush       |
-| thinking | Thinking   | Thinking     | none        |
-| angry    | Angry      | AngryGesture | shadow      |
-| doubt    | Doubt      | DoubtGesture | none        |
+| emotion   | expression | body_action      | face_effect |
+| --------- | ---------- | ---------------- | ----------- |
+| neutral   | Default    | None             | none        |
+| soft      | Soft       | SoftTalk         | none        |
+| happy     | Happy      | HappyGesture     | none        |
+| shy       | Shy        | ShyGesture       | blush       |
+| thinking  | Thinking   | Thinking         | none        |
+| angry     | Angry      | AngryGesture     | shadow      |
+| sad       | Sad        | SadGesture       | none        |
+| surprised | Surprised  | SurprisedGesture | none        |
+| proud     | Proud      | ProudGesture     | none        |
+| nervous   | Nervous    | NervousGesture   | none        |
+| doubt     | Doubt      | DoubtGesture     | none        |
+| worried   | Worried    | WorriedGesture   | none        |
 
 这样做可以降低 Unity 端复杂度。Unity 不需要猜模型输出是什么意思，只需要根据固定枚举执行对应表情和动作。同时，后端还可以根据关系状态做二次修正，比如低好感阶段遇到亲密推进时，强制把害羞或开心表现改成警惕、怀疑或生气。
 
 当然，这样处理也是为了尽可能压缩系统提示词，减少大模型在生成表现标签时的判断负担。部分表现逻辑由程序侧承担后，模型无需在每次回复中都重新考虑所有标签，从而降低推理成本并减少响应延迟。
+
+实际映射函数还会叠加关系阶段和临时态度规则。低好感亲密推进会被强制改为防备表现，`cold` 状态也不会突然出现甜蜜、害羞或过度亲近的标签。
+
+```python
+# services/dialogue_stream_service.py
+def map_emotion_to_performance(
+    *,
+    emotion: str,
+    intensity: float,
+    relationship_state: dict,
+    user_message: str,
+) -> dict:
+    emotion = normalize_allowed_label(emotion, ALLOWED_EMOTIONS) or "neutral"
+    intensity = clamp01(intensity)
+
+    stage = str(relationship_state.get("relationship_stage", "familiar")).lower()
+    attitude = str(relationship_state.get("relationship_attitude", "stable")).lower()
+
+    if stage in LOW_AFFECTION_STAGES and detect_intimacy_attempt_text(user_message):
+        emotion = "angry"
+        intensity = max(intensity, 0.7)
+        base = {
+            "expression": "Angry",
+            "body_action": "AngryGesture",
+            "face_effect": "shadow",
+        }
+    else:
+        base = dict(
+            EMOTION_PERFORMANCE_MAP.get(
+                emotion,
+                EMOTION_PERFORMANCE_MAP["neutral"],
+            )
+        )
+
+        if attitude == "cold" and emotion in {"shy", "happy", "soft"}:
+            emotion = "doubt"
+            intensity = max(intensity, 0.45)
+            base = {
+                "expression": "Doubt",
+                "body_action": "None",
+                "face_effect": "none",
+            }
+
+        if stage in LOW_AFFECTION_STAGES and emotion in {"shy", "happy"}:
+            emotion = "doubt"
+            intensity = max(intensity, 0.45)
+            base = {
+                "expression": "Doubt",
+                "body_action": "None",
+                "face_effect": "none",
+            }
+
+    expression = normalize_allowed_label(
+        base.get("expression", "Default"),
+        ALLOWED_EXPRESSIONS,
+    ) or "Default"
+    body_action = normalize_allowed_label(
+        base.get("body_action", "None"),
+        ALLOWED_BODY_ACTIONS,
+    ) or "None"
+    face_effect = normalize_allowed_label(
+        base.get("face_effect", "none"),
+        ALLOWED_FACE_EFFECTS,
+    ) or "none"
+
+    action_intensity = 0.0 if body_action == "None" else clamp01(
+        0.25 + intensity * 0.65
+    )
+
+    if emotion == "shy" and intensity >= 0.75:
+        face_effect = "shy_blush"
+    if emotion == "angry" and intensity >= 0.6:
+        face_effect = "shadow"
+
+    return {
+        "emotion": emotion,
+        "emotion_intensity": intensity,
+        "expression": expression,
+        "body_action": body_action,
+        "action_intensity": action_intensity,
+        "face_effect": face_effect,
+    }
+```
 
 ## 分层记忆系统
 
@@ -586,6 +806,55 @@ LLM 只负责输出 `emotion` 和 `intensity`，不直接决定 Unity 里的具�
 
 关系系统还参与表现约束。比如低好感阶段，如果玩家突然提出亲密要求，后端会把这类输入识别为边界压力，不让角色输出过于甜蜜的回应。这能避免“数值还很低，但角色突然变得很亲密”的违和感。
 
+关系评估本身只提供语义维度和建议值，最终数值变化、阶段映射、连续互动状态和持久化都在后端完成。下面这段实现对应前面“关系评估不阻塞首句”的设计：它在拿到评估事件后异步执行，完成后才生成最终的 `dialogue_state`。
+
+```python
+# services/relationship_service.py
+async def apply_affection_evaluation(
+    user_id: str,
+    evaluation: dict[str, Any],
+    user_message: str,
+) -> dict[str, Any]:
+    state = await load_relationship_state(user_id)
+
+    current_value = int(state.get("affection_value", DEFAULT_AFFECTION_VALUE))
+    current_stage = str(state.get("relationship_stage", "familiar"))
+
+    raw_delta = calculate_raw_delta_from_affection_evaluation(
+        evaluation=evaluation,
+        state=state,
+        user_message=user_message,
+    )
+    safe_delta = validate_affection_delta(
+        raw_delta=raw_delta,
+        user_message=user_message,
+        current_affection_value=current_value,
+        current_relationship_stage=current_stage,
+    )
+    final_delta = apply_relationship_dynamics_modifier(
+        raw_delta=safe_delta,
+        state=state,
+    )
+
+    new_value = clamp_int(
+        current_value + final_delta,
+        MIN_AFFECTION_VALUE,
+        MAX_AFFECTION_VALUE,
+    )
+    state["affection_value"] = new_value
+    state["relationship_stage"] = resolve_relationship_stage(new_value)
+    state["last_affection_delta"] = final_delta
+    state["last_affection_reason"] = normalize_affection_reason(
+        evaluation.get("reason", ""),
+        final_delta,
+    )
+    state["interaction_count"] = int(state.get("interaction_count", 0)) + 1
+    state["updated_at"] = now_iso()
+
+    state = update_streaks_and_attitude(state, final_delta)
+    return await save_relationship_state(state)
+```
+
 ## TTS 流式语音
 
 语音部分使用 MiniMax TTS WebSocket。当后端启动时会初始化一个 WebSocket 连接池，默认配置为 4 个连接，用来并发处理多句 `sentence_fast` 的语音合成任务。每当 LLM 输出一句 `sentence_fast`，后端就会创建一个 TTS 任务，把这句话发送给 MiniMax。我使用的语音模型是Speech-2.8-Turbo。
@@ -597,7 +866,7 @@ MiniMax WebSocket 返回的音频数据并不是直接可播放的 PCM，而是 
 整体流程是：
 
 ```text
-sentence_fast -> TTS WebSocket -> MP3 hex -> MP3 bytes -> PCM chunk -> base64 -> SSE -> Unit
+sentence_fast -> TTS WebSocket -> MP3 hex -> MP3 bytes -> PCM chunk -> base64 -> SSE -> Unity
 ```
 
 第一个 PCM chunk 到达后，后端马上发送 `sentence_start`。后续 chunk 通过 `audio_chunk` 继续发送。等一句话的音频结束，再发送 `is_final=true` 的空 chunk，告诉 Unity 这一句已经结束。
@@ -764,6 +1033,90 @@ Assets/Scripts
 
 Unity 侧的核心任务是把后端发来的抽象事件变成具体表现。后端不会直接控制 Animator，也不会知道场景中的模型结构。它只发出 `expression=Shy`、`body_action=HappyGesture`、`face_effect=blush` 这样的标签。Unity 端再根据这些标签驱动具体组件。
 
+## Unity 运行时分层与场景依赖
+
+目录只是代码的物理位置，真正的运行链路由一组 `MonoBehaviour` 组件连接。为了避免网络、播放和模型控制互相直接依赖，项目把它们分为四层：
+
+| 层级       | 关键组件                                                               | 输入                                | 输出                           |
+| ---------- | ---------------------------------------------------------------------- | ----------------------------------- | ------------------------------ |
+| 输入与状态 | `PlayerMovementController`、`SpatialPerceptionSensor`                  | 玩家移动、相机朝向、角色 Transform  | `SpatialStateData`             |
+| 网络与协议 | `PythonSSEChatService`、`SSEDownloadHandler`、`RelationshipApiService` | 玩家文本、空间快照、HTTP/SSE 字节流 | C# 对话与关系事件              |
+| 播放与编排 | `DialoguePlaybackController`、`WavAudioDecoder`                        | 句子、PCM 块、WAV 回退              | `AudioSource` 播放事件         |
+| 角色表现   | `CharacterPerformanceController`、口型/表情/动作/凝视组件              | 播放事件、关系状态、空间状态        | Animator、骨骼、材质与角色动作 |
+
+场景中最关键的连接关系是：`DialoguePlaybackController` 的 `chatServiceBehaviour` 指向 `PythonSSEChatService`，`audioDecoderBehaviour` 指向 `WavAudioDecoder`；`CharacterPerformanceController` 订阅播放控制器的句子开始/结束事件；`AffectionSystem` 同时订阅播放控制器和 `RelationshipApiService` 的关系状态；`SpatialReactionController` 则读取空间状态和好感度后，再调用表现控制器。
+
+这种连接方式看起来比“一个脚本管理全部事情”多了一些组件，但边界更清楚：替换后端协议时不必改 Animator；替换角色模型时不必改 SSE；调试音频时也不必触碰好感度逻辑。
+
+## 数据契约：先把外部包转换成 Unity 内部事件
+
+网络层不应让每一个角色脚本都去读取 JSON 字符串。项目先把后端字段转换为可序列化的 C# 数据，再通过接口事件通知下游。下面是请求、句子和流式音频块的核心字段：
+
+```csharp
+[Serializable]
+public class ChatRequestData
+{
+    public string user_id;
+    public string message;
+    public SpatialStateData spatial_state;
+}
+
+[Serializable]
+public class DialogueSentenceData
+{
+    public DialogueMessageType MessageType = DialogueMessageType.Sentence;
+
+    public int Index;
+    public string Text;
+    public string AudioBase64;
+    public bool IsStreamingAudio;
+    public string AudioFormat;
+    public int SampleRate;
+    public int Channels;
+    public bool IsFinalAudioChunk;
+    public float AudioDurationSeconds;
+
+    public string DialogueMood = string.Empty;
+    public string Emotion = string.Empty;
+    public float EmotionIntensity;
+    public string Expression = string.Empty;
+    public string BodyAction = string.Empty;
+    public float ActionIntensity;
+    public string FaceEffect = "none";
+}
+
+[Serializable]
+public class DialogueAudioChunkData
+{
+    public int SentenceIndex;
+    public int ChunkIndex;
+    public string AudioBase64;
+    public string Format;
+    public int SampleRate;
+    public int Channels;
+    public bool IsFinal;
+}
+```
+
+播放层只依赖 `IChatService`，因此它不关心底层到底是 Python SSE、Mock 服务还是未来的 WebSocket 实现：
+
+```csharp
+public interface IChatService
+{
+    event Action OnRequestStarted;
+    event Action<DialogueSentenceData> OnSentenceReceived;
+    event Action<DialogueSentenceData> OnSentenceStreamStarted;
+    event Action<DialogueAudioChunkData> OnAudioChunkReceived;
+    event Action<DialogueStateData> OnDialogueStateReceived;
+    event Action OnRequestFinished;
+    event Action<string> OnRequestError;
+
+    IEnumerator SendMessage(string userId, string message);
+}
+```
+
+这组事件把“协议解析”和“业务消费”分开：播放控制器订阅句子和音频块，`AffectionSystem` 订阅关系状态，调试面板订阅播放状态。后续即使调整后端 JSON 字段，也只需要收敛到网络服务中修改。
+
 ## 网络层：接收 SSE 事件
 
 网络层主要由 `PythonSSEChatService.cs` 和 `SSEDownloadHandler.cs` 负责。
@@ -783,6 +1136,196 @@ Unity 侧的核心任务是把后端发来的抽象事件变成具体表现。�
 - `OnRequestError`
 
 这样播放层和表现层不需要知道 SSE 字符串怎么解析，只需要订阅 C# 事件。
+
+### 以增量方式拼出完整 SSE 事件
+
+`UnityWebRequest` 的回调边界不等于 SSE 事件边界：一次 `ReceiveData` 可能只收到半个 JSON，也可能连续收到多个事件。因此下载处理器必须先把字节解码到字符串缓冲区，只有出现空行分隔符后才交给 JSON 解析。这是当前项目的实现：
+
+```csharp
+public class SSEDownloadHandler : DownloadHandlerScript
+{
+    private readonly Action<string> onDataReceived;
+    private readonly StringBuilder buffer = new StringBuilder(2048);
+
+    public SSEDownloadHandler(Action<string> onDataReceived) : base()
+    {
+        this.onDataReceived = onDataReceived;
+    }
+
+    protected override bool ReceiveData(byte[] data, int dataLength)
+    {
+        if (data == null || dataLength <= 0)
+            return false;
+
+        string chunk = Encoding.UTF8.GetString(data, 0, dataLength);
+        buffer.Append(chunk);
+
+        string current = buffer.ToString();
+        int index;
+
+        while ((index = current.IndexOf("\n\n", StringComparison.Ordinal)) >= 0)
+        {
+            string completeEvent = current.Substring(0, index);
+            current = current.Substring(index + 2);
+
+            buffer.Clear();
+            buffer.Append(current);
+
+            string[] lines = completeEvent.Split(
+                new[] { '\n', '\r' },
+                StringSplitOptions.RemoveEmptyEntries
+            );
+
+            for (int i = 0; i < lines.Length; i++)
+            {
+                string line = lines[i];
+                if (!line.StartsWith("data: "))
+                    continue;
+
+                string content = line.Substring(6);
+                if (content != "[DONE]")
+                    onDataReceived?.Invoke(content);
+            }
+
+            current = buffer.ToString();
+        }
+
+        return true;
+    }
+}
+```
+
+这里的 `buffer` 是必要的。若直接在每次回调里 `JsonUtility.FromJson`，网络分片恰好切在 JSON 中间时，解析必然失败。当前协议约定服务端以 `\n\n` 分隔事件，因此后端输出必须保持这个 SSE 帧格式。
+
+### 发送请求时附带空间快照
+
+`PythonSSEChatService` 在每轮请求开始时清空上一轮索引集合，触发开始事件，然后从传感器复制一个不可变快照写入请求体。这样采样协程即使在请求期间继续更新，也不会篡改已发送的空间状态：
+
+```csharp
+public IEnumerator SendMessage(string userId, string message)
+{
+    streamedSentenceIndexes.Clear();
+    completedStreamedSentenceIndexes.Clear();
+    OnRequestStarted?.Invoke();
+
+    SpatialStateData spatialSnapshot = null;
+    if (sendSpatialState && spatialSensor != null)
+        spatialSnapshot = spatialSensor.CreateSnapshot();
+
+    ChatRequestData requestData = new ChatRequestData
+    {
+        user_id = userId,
+        message = message,
+        spatial_state = spatialSnapshot
+    };
+
+    string jsonBody = JsonUtility.ToJson(requestData);
+    byte[] bodyRaw = Encoding.UTF8.GetBytes(jsonBody);
+
+    bool hasError = false;
+    string errorMessage = null;
+
+    using (UnityWebRequest request = new UnityWebRequest(
+        backendUrl,
+        UnityWebRequest.kHttpVerbPOST
+    ))
+    {
+        request.uploadHandler = new UploadHandlerRaw(bodyRaw);
+        request.downloadHandler = new SSEDownloadHandler(OnChunkReceived);
+        request.SetRequestHeader("Content-Type", "application/json");
+        request.SetRequestHeader("Accept", "text/event-stream");
+
+        request.SendWebRequest();
+        while (!request.isDone)
+            yield return null;
+
+        if (request.result != UnityWebRequest.Result.Success)
+        {
+            hasError = true;
+            errorMessage = request.error;
+        }
+    }
+
+    if (hasError)
+        OnRequestError?.Invoke(errorMessage);
+
+    OnRequestFinished?.Invoke();
+}
+```
+
+### 将协议包拆成播放事件和状态事件
+
+解析时的关键不是简单反序列化，而是根据 `type` 发出不同事件。`sentence_start` 同时携带文本、表现标签和第一块音频；`audio_chunk` 只追加音频；完整 `sentence` 则保留给非流式或 WAV 回退路径：
+
+```csharp
+private void OnChunkReceived(string jsonContent)
+{
+    try
+    {
+        BackendSSEPackage package =
+            JsonUtility.FromJson<BackendSSEPackage>(jsonContent);
+
+        if (package == null)
+            return;
+
+        if (package.type == "sentence_start")
+        {
+            DialogueSentenceData data = CreateSentenceData(package, true);
+            if (data.Index > 0)
+                streamedSentenceIndexes.Add(data.Index);
+
+            OnSentenceStreamStarted?.Invoke(data);
+            EmitAudioChunk(package);
+            return;
+        }
+
+        if (package.type == "audio_chunk")
+        {
+            EmitAudioChunk(package);
+            return;
+        }
+
+        if (package.type == "sentence")
+        {
+            if (package.index > 0 &&
+                completedStreamedSentenceIndexes.Contains(package.index))
+            {
+                return;
+            }
+
+            OnSentenceReceived?.Invoke(CreateSentenceData(package, false));
+            return;
+        }
+
+        if (package.type == "dialogue_state")
+        {
+            DialogueStateData stateData = new DialogueStateData(
+                package.affection_value,
+                package.relationship_stage,
+                package.affection_delta,
+                package.affection_reason,
+                package.positive_streak,
+                package.negative_streak,
+                package.neutral_streak,
+                package.relationship_attitude,
+                package.attitude_turns_remaining,
+                package.interaction_count,
+                package.dialogue_mood
+            );
+
+            OnDialogueStateReceived?.Invoke(stateData);
+        }
+    }
+    catch (Exception e)
+    {
+        OnRequestError?.Invoke(
+            $"JSON 解析失败: {e.Message}\n内容: {jsonContent}"
+        );
+    }
+}
+```
+
+当后端仍发送旧式完整 WAV 时，播放层会将同一句的 WAV 记录为 fallback；当 PCM 格式不受支持、流中断或首块迟迟不来时，仍可以走完整音频播放，避免协议升级成Websocket后，因网络状况不佳而直接让角色无声。
 
 ## 播放层：流式 PCM 音频
 
@@ -804,6 +1347,240 @@ Unity 侧的核心任务是把后端发来的抽象事件变成具体表现。�
 
 这些细节看起来偏底层，但它们直接决定了虚拟人说话是否顺滑。
 
+### 为什么不能等完整 WAV 再播放
+
+如果 Unity 等待一整句 MP3 或 WAV 下载完成，再交给 `AudioSource.Play()`，语音的可感知延迟会包含整句 TTS 合成时间。项目改为让后端下发 `pcm_s16le`：每个采样值占两个字节，Unity 可以立即把它转成 `[-1, 1]` 范围的 `float`，由 `AudioClip` 的 PCM 回调消费。
+
+播放控制器收到 `sentence_start` 后先创建句子缓冲并入队；后续音频块只负责追加，不会重复创建播放任务：
+
+```csharp
+private void HandleSentenceStreamStarted(DialogueSentenceData sentence)
+{
+    if (sentence == null)
+        return;
+
+    GetOrCreateStreamingBuffer(
+        sentence.Index,
+        sentence.SampleRate,
+        sentence.Channels
+    );
+
+    sentenceQueue.Enqueue(sentence);
+    OnSentenceQueued?.Invoke(sentence);
+}
+
+private void HandleAudioChunkReceived(DialogueAudioChunkData chunk)
+{
+    if (chunk == null)
+        return;
+
+    StreamingSentenceBuffer buffer = GetOrCreateStreamingBuffer(
+        chunk.SentenceIndex,
+        chunk.SampleRate,
+        chunk.Channels
+    );
+
+    if (!buffer.AppendChunk(chunk, out string error))
+        OnPlaybackError?.Invoke(error);
+}
+```
+
+`StreamingSentenceBuffer` 是每句话独立的生产者—消费者队列。SSE 回调是生产者，`AudioClip` 的 PCM Reader Callback 是消费者。下面这段代码完成 Base64 解码、16 位小端 PCM 转换以及最终块标记：
+
+```csharp
+public bool AppendChunk(DialogueAudioChunkData chunk, out string error)
+{
+    error = null;
+
+    if (chunk == null)
+    {
+        error = "audio chunk is null";
+        return false;
+    }
+
+    UpdateFormat(chunk.SampleRate, chunk.Channels);
+    string format = string.IsNullOrWhiteSpace(chunk.Format)
+        ? "pcm_s16le"
+        : chunk.Format;
+
+    if (string.Equals(format, "wav", StringComparison.OrdinalIgnoreCase))
+    {
+        lock (syncRoot)
+        {
+            if (!string.IsNullOrEmpty(chunk.AudioBase64))
+                wavBase64 = chunk.AudioBase64;
+
+            if (chunk.IsFinal)
+                finalReceived = true;
+
+            lastAppendTime = Time.realtimeSinceStartup;
+        }
+        return true;
+    }
+
+    if (!string.Equals(format, "pcm_s16le", StringComparison.OrdinalIgnoreCase))
+    {
+        if (chunk.IsFinal)
+            MarkFinal();
+
+        error = $"unsupported streaming audio format: {format}";
+        return false;
+    }
+
+    float[] decodedSamples = null;
+    if (!string.IsNullOrEmpty(chunk.AudioBase64))
+    {
+        try
+        {
+            byte[] audioBytes = Convert.FromBase64String(chunk.AudioBase64);
+            int sampleCount = audioBytes.Length / 2;
+            decodedSamples = new float[sampleCount];
+
+            for (int i = 0; i < sampleCount; i++)
+            {
+                int byteIndex = i * 2;
+                short sample = unchecked((short)(
+                    audioBytes[byteIndex] |
+                    (audioBytes[byteIndex + 1] << 8)
+                ));
+                decodedSamples[i] = sample / 32768f;
+            }
+        }
+        catch (Exception e)
+        {
+            if (chunk.IsFinal)
+                MarkFinal();
+
+            error = $"pcm chunk decode failed: {e.Message}";
+            return false;
+        }
+    }
+
+    lock (syncRoot)
+    {
+        if (decodedSamples != null)
+        {
+            for (int i = 0; i < decodedSamples.Length; i++)
+                pendingSamples.Enqueue(decodedSamples[i]);
+
+            if (decodedSamples.Length > 0)
+            {
+                hasAnyPcmSamples = true;
+                totalDecodedSamples += decodedSamples.Length;
+            }
+        }
+
+        if (chunk.IsFinal)
+            finalReceived = true;
+
+        lastAppendTime = Time.realtimeSinceStartup;
+    }
+
+    return true;
+}
+
+public void ReadSamples(float[] data)
+{
+    lock (syncRoot)
+    {
+        bool hadUnderrun = false;
+
+        for (int i = 0; i < data.Length; i++)
+        {
+            if (pendingSamples.Count > 0)
+            {
+                data[i] = pendingSamples.Dequeue();
+            }
+            else
+            {
+                data[i] = 0f;
+                if (!finalReceived)
+                    hadUnderrun = true;
+            }
+        }
+
+        if (hadUnderrun)
+            underrunCount++;
+    }
+}
+```
+
+`lock` 不用于把网络播放“串行化”，而是防止 Audio Callback 取样本的同时，主线程正在把新的 PCM 块写入队列。没有这个保护时，偶发的队列竞争会表现为爆音、空白或难以复现的索引异常。
+
+### 起播、低水位和恢复水位
+
+项目不会一收到一个 PCM 样本就开始播放。过早起播会很快耗尽缓存，造成频繁卡顿；等待过多又失去了流式的意义。因此播放器使用三个阈值：
+
+| 阶段   | 配置                           | 作用                                       |
+| ------ | ------------------------------ | ------------------------------------------ |
+| 起播   | `streamingStartBufferSeconds`  | 缓冲达到该时长才开始播放，降低首段断流概率 |
+| 低水位 | `streamingLowWaterSeconds`     | 低于该时长时暂停 `AudioSource`             |
+| 恢复   | `streamingResumeBufferSeconds` | 缓冲回升到该时长后继续播放                 |
+
+真正创建流式 `AudioClip` 并在播放过程中处理 rebuffer 的核心逻辑如下。`AudioClip.Create` 的最后一个参数传入 `ReadSamples`，因此 Unity 需要样本时会从上面的队列拉取：
+
+```csharp
+int sampleRate = Mathf.Max(1, buffer.SampleRate);
+int channels = Mathf.Max(1, buffer.Channels);
+int maxClipSamples = Mathf.Max(
+    sampleRate,
+    Mathf.CeilToInt(maxStreamingClipSeconds * sampleRate)
+);
+
+AudioClip clip = AudioClip.Create(
+    $"tts_stream_{sentence.Index}",
+    maxClipSamples,
+    channels,
+    sampleRate,
+    true,
+    buffer.ReadSamples
+);
+
+audioSource.clip = clip;
+audioSource.Play();
+OnSentenceStarted?.Invoke(sentence, audioSource);
+
+bool pausedForBuffer = false;
+float rebufferStartTime = 0f;
+
+while (!HasStreamingPlaybackFinished(buffer, audioSource))
+{
+    if (!buffer.IsFinal)
+    {
+        float lowWaterSeconds = GetStreamingLowWaterSeconds(sampleRate);
+        float resumeBufferSeconds = GetStreamingResumeBufferSeconds(sampleRate);
+
+        if (!pausedForBuffer && buffer.BufferedSeconds <= lowWaterSeconds)
+        {
+            audioSource.Pause();
+            pausedForBuffer = true;
+            rebufferStartTime = Time.realtimeSinceStartup;
+        }
+
+        if (pausedForBuffer)
+        {
+            bool canResume = buffer.IsFinal ||
+                buffer.HasEnoughBuffered(resumeBufferSeconds);
+            bool waitExpired = Time.realtimeSinceStartup - rebufferStartTime >=
+                Mathf.Max(0f, maxStreamingRebufferSeconds);
+
+            if (canResume || waitExpired)
+            {
+                audioSource.UnPause();
+                pausedForBuffer = false;
+            }
+        }
+    }
+
+    if (!audioSource.isPlaying && !pausedForBuffer)
+        break;
+
+    yield return null;
+}
+```
+
+如果后端请求已经结束、但某句始终没有收到 final 块，播放器会根据 `streamingChunkTimeoutSeconds` 主动结束等待；如果期间收到了 `wavBase64`，则停掉流式 `AudioSource` 并回到 `WavAudioDecoder`。这种降级保证了新旧协议可以共存。
+
 ## 角色表现层：文本不是唯一输出
 
 `CharacterPerformanceController.cs` 负责把一句话的表现数据真正应用到角色身上。
@@ -819,6 +1596,171 @@ Unity 侧的核心任务是把后端发来的抽象事件变成具体表现。�
 这也是这个项目和普通聊天界面的最大区别。玩家看到的不是一段文字，而是一个角色带着表情和动作说出这句话。
 
 我把表现标签设计成后端输出、Unity 执行的形式，是为了让角色表现更稳定。比如后端输出 `DoubtGesture`，Unity 只需要把它解析成 `BodyActionId.DoubtGesture`，然后交给 `BodyMotionController` 播放对应动作。
+
+### 句子开始是表现调度的唯一入口
+
+表现层不在网络包到达时立即驱动 Animator，而是在播放层确认该句真正开始播放时处理。这一点很重要：若网络刚收到第二句时就修改表情和动作，第一句还在说话的角色会提前“跳表演”。`CharacterPerformanceController` 订阅 `DialoguePlaybackController.OnSentenceStarted` 后，使用下面的方法在声音、动作和口型之间建立同步：
+
+```csharp
+public void OnSentenceStarted(
+    DialogueSentenceData sentenceData,
+    AudioSource audioSource
+)
+{
+    StopBodyExitDelayCoroutine();
+
+    if (sentenceData != null &&
+        !string.IsNullOrWhiteSpace(sentenceData.DialogueMood))
+    {
+        latestDialogueMood = sentenceData.DialogueMood;
+    }
+
+    bodyMotionController?.SetSpeaking(true);
+
+    ApplyModelExpression(sentenceData);
+    ApplyModelBodyAction(sentenceData);
+    ApplyModelFaceEffect(sentenceData, audioSource);
+
+    mouthSyncController?.StartLipSync(audioSource);
+
+    if (enableInitialMouthHint)
+    {
+        StopMouthHintCoroutine();
+        mouthHintCoroutine = StartCoroutine(
+            SimulateInitialMouthHints(sentenceData.Text, audioSource)
+        );
+    }
+}
+
+public void OnSentenceEnded(DialogueSentenceData sentenceData)
+{
+    StopMouthHintCoroutine();
+    mouthSyncController?.StopLipSync();
+    bodyMotionController?.SetSpeaking(false);
+
+    // 表情和动作不在这里立即重置。
+    // 它们会保留到下一句，或由对话结束策略统一处理。
+}
+```
+
+`OnSentenceEnded` 故意不把表情和动作清零。若每句话结束都重置，句间短暂停顿会让角色闪回默认脸；当前策略让动作保持到下一句开始，再由整轮对话结束策略按照关系阶段收尾。
+
+### 后端标签如何安全落到 Animator
+
+表情和身体动作先走枚举解析。好处是后端输出的是稳定的字符串协议，而 Unity 保留了明确的白名单；未知标签不会直接写入 Animator，而是记录警告并维持当前表现：
+
+```csharp
+private void ApplyModelExpression(DialogueSentenceData sentenceData)
+{
+    if (expressionController == null || sentenceData == null)
+        return;
+
+    string expressionTag = sentenceData.Expression;
+    if (string.IsNullOrWhiteSpace(expressionTag))
+    {
+        Debug.LogWarning(
+            $"[Performance] 表情标签缺失，保持当前表情 | text={sentenceData.Text}"
+        );
+        return;
+    }
+
+    if (Enum.TryParse(expressionTag, true, out ExpressionType expressionType))
+    {
+        expressionController.SetExpression(expressionType);
+        lastExpressionType = expressionType;
+        hasLastExpression = true;
+    }
+    else
+    {
+        Debug.LogWarning(
+            $"[Performance] 非法表情标签，已忽略 | expression={expressionTag}"
+        );
+    }
+}
+
+private void ApplyModelBodyAction(DialogueSentenceData sentenceData)
+{
+    if (bodyMotionController == null || sentenceData == null)
+        return;
+
+    if (spatialBodyLockActive)
+    {
+        Debug.Log(
+            $"[Performance] 空间身体动作锁生效，忽略模型身体动作 | " +
+            $"lockedAction={spatialLockedBodyAction}"
+        );
+        return;
+    }
+
+    string bodyActionTag = sentenceData.BodyAction;
+    if (string.IsNullOrWhiteSpace(bodyActionTag))
+        return;
+
+    if (Enum.TryParse(bodyActionTag, true, out BodyActionId bodyAction))
+    {
+        if (bodyAction == BodyActionId.None)
+        {
+            lastBodyAction = BodyActionId.None;
+            bodyMotionController.RequestExitAction();
+            return;
+        }
+
+        bodyMotionController.PlayAction(bodyAction);
+        lastBodyAction = bodyAction;
+    }
+    else
+    {
+        Debug.LogWarning(
+            $"[Performance] 非法身体动作标签，保持当前动作 | " +
+            $"bodyAction={bodyActionTag}"
+        );
+    }
+}
+```
+
+当前 Animator 需要与以下参数约定保持一致：`ExpressionState` 接收 `ExpressionType` 对应的整数，`BodyAction` 接收 `BodyActionId`，`BodyEnter` 是进入动作的 Trigger，`BodyShouldExit` 是退出动作的 Bool，`IsSpeaking` 表示角色是否正在说话。模型换成其他资源时，这些参数名可以在 Inspector 中配置，但 Animator Controller 必须提供对应状态机逻辑。
+
+### 空间动作锁防止“被一句话打断”
+
+玩家距离过近时，角色的 `Avoid` 动作必须优先于普通对话动作。否则后端刚好返回一条开心的句子，就会覆盖正在发生的回避。表现控制器通过一个简单的锁来明确优先级：
+
+```csharp
+public void SetSpatialBodyLock(bool active, BodyActionId lockedAction = BodyActionId.None)
+{
+    if (!enableSpatialBodyLock)
+        return;
+
+    spatialBodyLockActive = active;
+    spatialLockedBodyAction = active ? lockedAction : BodyActionId.None;
+}
+
+public void ClearSpatialBodyLock()
+{
+    spatialBodyLockActive = false;
+    spatialLockedBodyAction = BodyActionId.None;
+}
+
+public void PlaySpatialBodyAction(
+    BodyActionId actionId,
+    bool restartIfSame = false
+)
+{
+    if (bodyMotionController == null)
+        return;
+
+    if (actionId == BodyActionId.None)
+    {
+        bodyMotionController.RequestExitAction();
+        lastBodyAction = BodyActionId.None;
+        return;
+    }
+
+    bodyMotionController.PlayAction(actionId, restartIfSame);
+    lastBodyAction = actionId;
+}
+```
+
+脸部特效走独立控制器。`blush`、`shy_blush` 和 `shadow` 都是短时 override，在持续时间内会压住普通脸部目标；时间到后再允许基础表情继续驱动材质参数。因此“害羞脸红”不会永久残留，也不会与空间阴影叠出不可预测的状态。
 
 ## 口型同步
 
@@ -838,6 +1780,162 @@ Unity 侧的核心任务是把后端发来的抽象事件变成具体表现。�
 
 此外，`CharacterPerformanceController` 还会在句子开头根据拼音声母做一些强制口型提示。例如 `b`、`p`、`m` 更容易触发短暂闭口，`h` 可以触发更接近 E 的口型。这样可以弥补单纯音量驱动在句子开头不够准确的问题。
 
+### 音量驱动口型的核心循环
+
+当前方案不是音素级唇形同步，而是一个稳定、成本低的音量驱动近似。它每隔一小段时间从正在播放的 `AudioSource` 读取输出样本，计算平均绝对振幅，并映射到 Animator 的 5 个口型状态。核心循环如下：
+
+```csharp
+private IEnumerator LipSyncLoop()
+{
+    WaitForSeconds wait = new WaitForSeconds(updateInterval);
+
+    while (currentAudioSource != null && currentAudioSource.isPlaying)
+    {
+        if (forceMouthStateActive)
+        {
+            if (Time.time < forceMouthStateUntil)
+            {
+                SetMouthState(forcedMouthState);
+                yield return wait;
+                continue;
+            }
+
+            forceMouthStateActive = false;
+        }
+
+        currentAudioSource.GetOutputData(sampleBuffer, 0);
+        float rawAmplitude = AudioUtility.CalculateAverageAbs(
+            sampleBuffer,
+            sampleBuffer.Length
+        );
+
+        smoothedAmplitude = SmoothAmplitude(rawAmplitude);
+
+        int targetState = ResolveMouthState(smoothedAmplitude);
+        targetState = GetSteppedState(targetState);
+
+        if (CanSwitchState(targetState))
+            SetMouthState(targetState);
+
+        yield return wait;
+    }
+
+    if (useClosingMouthState)
+    {
+        SetMouthState(NState);
+        yield return new WaitForSeconds(closingStateDuration);
+    }
+
+    SetMouthState(DefaultState);
+    syncCoroutine = null;
+    currentAudioSource = null;
+}
+
+private float SmoothAmplitude(float rawAmplitude)
+{
+    float riseSpeed = 14f;
+    float fallSpeed = 8f;
+    float speed = rawAmplitude > smoothedAmplitude ? riseSpeed : fallSpeed;
+
+    return Mathf.Lerp(smoothedAmplitude, rawAmplitude, updateInterval * speed);
+}
+
+private int ResolveMouthState(float amplitude)
+{
+    if (amplitude < silenceThreshold) return DefaultState;
+    if (amplitude < smallThreshold) return EState;
+    if (amplitude < mediumThreshold) return AState;
+    if (amplitude < largeThreshold) return OState;
+    return AState;
+}
+```
+
+这里有两层防抖。第一层是 `SmoothAmplitude`：张嘴与闭嘴采用不同速度，减少音频瞬态造成的跳变；第二层是 `GetSteppedState` 和 `stateHoldTime`：一次变化最多跨一个口型等级，并要求当前状态维持最短时间。对动画观感而言，宁可少切一次，也不应在相邻帧反复抖动。
+
+### 为什么还要做拼音声母提示
+
+仅通过音量不能准确判断爆破音和闭口音。项目使用 `NPinyin` 取得汉字声母，并在音频播放的目标时间点施加很短的强制状态。下面是从文本中的可发音字符推导提示时间、再覆盖当前口型的实现：
+
+```csharp
+private IEnumerator SimulateInitialMouthHints(
+    string text,
+    AudioSource audioSource
+)
+{
+    if (mouthSyncController == null ||
+        audioSource == null ||
+        audioSource.clip == null ||
+        pinyinInitialResolver == null ||
+        string.IsNullOrEmpty(text))
+    {
+        yield break;
+    }
+
+    List<int> spokenCharIndices = new List<int>();
+    for (int i = 0; i < text.Length; i++)
+    {
+        if (!IsPunctuationOrSpace(text[i]))
+            spokenCharIndices.Add(i);
+    }
+
+    if (spokenCharIndices.Count == 0)
+        yield break;
+
+    float perSpokenCharTime =
+        audioSource.clip.length / spokenCharIndices.Count;
+    lastHintAudioTime = -999f;
+
+    for (int spokenIndex = 0;
+         spokenIndex < spokenCharIndices.Count;
+         spokenIndex++)
+    {
+        char c = text[spokenCharIndices[spokenIndex]];
+        int? hintedState = GetHintStateByInitial(c);
+        if (!hintedState.HasValue)
+            continue;
+
+        float targetTime = perSpokenCharTime * spokenIndex;
+        if (hintedState.Value == MouthSyncController.DefaultState)
+            targetTime -= hintLeadTime;
+
+        targetTime = Mathf.Clamp(targetTime, 0f, audioSource.clip.length);
+        if (targetTime - lastHintAudioTime < minHintInterval)
+            continue;
+
+        while (audioSource.isPlaying && audioSource.time < targetTime)
+            yield return null;
+
+        if (!audioSource.isPlaying)
+            yield break;
+
+        mouthSyncController.TriggerForcedMouthState(
+            hintedState.Value,
+            GetHintDuration(hintedState.Value)
+        );
+        lastHintAudioTime = audioSource.time;
+    }
+}
+
+private int? GetHintStateByInitial(char c)
+{
+    string initial = pinyinInitialResolver.GetInitial(c);
+
+    switch (initial)
+    {
+        case "b":
+        case "p":
+        case "m":
+            return MouthSyncController.DefaultState;
+        case "h":
+            return MouthSyncController.EState;
+        default:
+            return null;
+    }
+}
+```
+
+这不是精确的字级对齐：当前实现将整句音频长度平均分配给可发音字符，目的只是让开头几个明显的闭口/小开口更自然。若后续需要更高精度，可以让 TTS 返回音素时间戳，再替换这层近似规则；基础的振幅口型循环仍然可以作为无时间戳时的降级方案。
+
 ## 空间感知：玩家站在哪里也会影响角色
 
 `SpatialPerceptionSensor.cs` 负责采集玩家和角色之间的空间状态。它会周期性计算：
@@ -850,6 +1948,86 @@ Unity 侧的核心任务是把后端发来的抽象事件变成具体表现。�
 - 是否发生了进入过近、离开过近等空间事件。
 
 这些信息会被放进下一次对话请求的 `spatial_state` 中。后端 Prompt 会根据这些状态调整回复。例如玩家距离过近时，低好感角色应该更警惕；高好感角色可能会害羞；如果当前已经处于 `too_close_reaction`，后端也知道角色正在做空间躲避动作。
+
+### 空间状态不是每帧上传，而是周期采样后快照上传
+
+`SpatialPerceptionSensor` 以 `sampleInterval` 周期计算状态。它不会在 `Update` 中每帧向后端发网络请求，而是持续维护一个本地 `currentState`；只有玩家发送消息时，网络层才调用 `CreateSnapshot()` 复制它。这既避免网络噪声，也保证一轮请求使用一致的空间上下文。
+
+```csharp
+private void SampleSpatialState()
+{
+    if (playerTransform == null || characterRoot == null)
+        return;
+
+    Vector3 characterPosition = characterRoot.position;
+    Vector3 playerPosition = playerTransform.position;
+    Vector3 toPlayer = playerPosition - characterPosition;
+
+    if (useHorizontalDistance)
+        toPlayer.y = 0f;
+
+    float distance = toPlayer.magnitude;
+    string newZone = ResolveDistanceZone(distance);
+    string spatialEvent = ResolveSpatialEvent(previousZone, newZone);
+
+    if (newZone != previousZone)
+    {
+        previousZone = newZone;
+        zoneEnteredTime = Time.time;
+        currentState.event_created_at = DateTime.UtcNow.ToString("o");
+    }
+
+    float signedAngle = ResolveSignedAngleToPlayer(playerPosition);
+    string relativePosition = ResolveRelativePosition(signedAngle);
+    bool isLookingAtCharacter = ResolvePlayerLookingAtCharacter();
+
+    if (isLookingAtCharacter)
+    {
+        if (!wasLookingAtCharacter)
+            gazeStartedTime = Time.time;
+
+        currentState.gaze_duration = Time.time - gazeStartedTime;
+    }
+    else
+    {
+        gazeStartedTime = Time.time;
+        currentState.gaze_duration = 0f;
+    }
+
+    wasLookingAtCharacter = isLookingAtCharacter;
+
+    currentState.distance = distance;
+    currentState.distance_zone = newZone;
+    currentState.relative_position = relativePosition;
+    currentState.signed_angle_to_player = signedAngle;
+    currentState.zone_duration = Time.time - zoneEnteredTime;
+    currentState.is_player_looking_at_character = isLookingAtCharacter;
+    currentState.spatial_event = spatialEvent;
+}
+
+private string ResolveDistanceZone(float distance)
+{
+    if (distance <= tooCloseRadius) return "too_close";
+    if (distance <= personalRadius) return "personal";
+    if (distance <= attentionRadius) return "attention";
+    return "far";
+}
+
+private string ResolveSpatialEvent(string oldZone, string newZone)
+{
+    if (oldZone == newZone)
+        return newZone == "too_close" ? "player_stay_too_close" : "none";
+
+    if (newZone == "too_close") return "player_enter_too_close";
+    if (oldZone == "too_close") return "player_exit_too_close";
+    if (newZone == "personal") return "player_enter_personal";
+    if (newZone == "attention") return "player_enter_attention";
+    if (newZone == "far") return "player_exit_attention";
+    return "zone_changed";
+}
+```
+
+`distance_zone` 是阈值状态，`spatial_event` 是状态变化事件，两者不能混为一谈。比如玩家一直停在 `too_close` 内时，区间仍是 `too_close`，但事件从首次的 `player_enter_too_close` 转为 `player_stay_too_close`。反应层可以据此决定是只触发一次动作，还是在停留一段时间后升级反应。
 
 ## 空间反应：不说话时角色也应该有反应
 
@@ -864,6 +2042,92 @@ Unity 侧的核心任务是把后端发来的抽象事件变成具体表现。�
 空间反应还会使用身体动作锁。比如过近时播放 `Avoid` 动作，普通对话动作不能立刻覆盖它。等玩家离开过近区域后，再延迟恢复默认表情、退出空间动作并清空脸部特效。
 
 这个机制让角色不只是在“说话时活着”，在玩家靠近、离开、注视时也会有状态变化。
+
+### `too_close` 的关系分支与恢复流程
+
+空间反应控制器读取同一份空间状态和好感阶段。玩家进入过近区，或在其中停留超过最短时间时，先锁住身体动作，再按关系阶段设置表情、脸部特效和凝视策略：
+
+```csharp
+private void HandleTooClose(
+    SpatialStateData spatialState,
+    string stage,
+    string attitude
+)
+{
+    bool justEnteredTooClose =
+        spatialState.spatial_event == "player_enter_too_close";
+
+    bool shouldTriggerTooClose =
+        (triggerTooCloseOnEnter && justEnteredTooClose) ||
+        spatialState.zone_duration >= tooCloseHoldTime;
+
+    if (!shouldTriggerTooClose)
+    {
+        HandleNormalSpatialGaze(spatialState, stage, attitude);
+        return;
+    }
+
+    if (currentState != SpatialReactionState.TooCloseReaction)
+    {
+        StopRecoverCoroutine();
+        currentState = SpatialReactionState.TooCloseReaction;
+        spatialSensor.SetReactionState("too_close_reaction");
+        ApplyTooClosePerformance(stage, attitude);
+    }
+
+    ApplyTooCloseGaze(stage);
+}
+
+private void ApplyTooClosePerformance(string stage, string attitude)
+{
+    bool lowAffection = stage == "distant" || stage == "stranger";
+    bool highAffection = stage == "close" || stage == "intimate";
+
+    performanceController.SetSpatialBodyLock(true, BodyActionId.Avoid);
+    performanceController.PlaySpatialBodyAction(BodyActionId.Avoid);
+
+    if (lowAffection)
+    {
+        performanceController.SetSpatialExpression(
+            stage == "distant"
+                ? ExpressionType.Nervous
+                : ExpressionType.Doubt
+        );
+        performanceController.TriggerSpatialFaceEffect("shadow", 2.0f);
+        return;
+    }
+
+    if (highAffection)
+    {
+        performanceController.SetSpatialExpression(ExpressionType.Shy);
+        string effect = stage == "intimate" ? "shy_blush" : "blush";
+        performanceController.TriggerSpatialFaceEffect(effect, 2.0f);
+        return;
+    }
+
+    performanceController.SetSpatialExpression(ExpressionType.Surprised);
+}
+```
+
+离开过近区后不立即清理，而是进入 `Recovering` 状态并等待一小段时间。这样可以避免玩家站在阈值边缘来回晃动时，`Avoid`、脸红和默认状态每一帧反复切换：
+
+```csharp
+private IEnumerator RecoverAfterDelay()
+{
+    yield return new WaitForSeconds(recoverDelayAfterExit);
+
+    performanceController.ClearSpatialBodyLock();
+    performanceController.RequestSpatialBodyExit();
+    performanceController.ResetSpatialExpression(ExpressionType.Default);
+    performanceController.ClearSpatialFaceEffect();
+
+    currentState = SpatialReactionState.Idle;
+    spatialSensor.SetReactionState("idle");
+    recoverCoroutine = null;
+}
+```
+
+除了过近反应，系统还会在 `close` 与 `intimate` 阶段、特定距离和凝视权重满足条件时触发 `Wave`。这类非对话行为不需要请求后端，能够让角色在玩家靠近但尚未输入文本时也维持“活着”的状态。
 
 ## 好感系统同步
 
@@ -884,6 +2148,65 @@ Unity 侧的 `AffectionSystem.cs` 会同步后端发来的 `dialogue_state`。�
 
 例如在 `close` 或 `intimate` 阶段，角色说完话后可以更久地保持最后的柔和表情或身体动作；如果本轮好感下降，角色会更快退出亲近表现；如果进入 `cold` 状态，则会降低停留感，恢复得更快。
 
+### 关系状态只以服务端结果为准
+
+好感度不在 Unity 根据关键词自行猜测。后端的关系服务负责评估与持久化，Unity 只把 `dialogue_state` 转成可显示、可驱动的本地状态。`AffectionSystem` 同步时会裁剪数值、填充空字段，并仅在真正变化时触发值和阶段事件：
+
+```csharp
+public void SyncFromServer(DialogueStateData stateData)
+{
+    if (stateData == null)
+        return;
+
+    int oldValue = affectionValue;
+    string oldStage = relationshipStage;
+
+    affectionValue = Mathf.Clamp(stateData.AffectionValue, 0, 100);
+    relationshipStage = string.IsNullOrWhiteSpace(stateData.RelationshipStage)
+        ? ResolveRelationshipStage(affectionValue)
+        : stateData.RelationshipStage;
+
+    lastDelta = stateData.AffectionDelta;
+    lastReason = string.IsNullOrWhiteSpace(stateData.AffectionReason)
+        ? "本轮互动未明显改变关系"
+        : stateData.AffectionReason;
+    interactionCount = Mathf.Max(0, stateData.InteractionCount);
+
+    positiveStreak = Mathf.Max(0, stateData.PositiveStreak);
+    negativeStreak = Mathf.Max(0, stateData.NegativeStreak);
+    neutralStreak = Mathf.Max(0, stateData.NeutralStreak);
+    relationshipAttitude = string.IsNullOrWhiteSpace(
+        stateData.RelationshipAttitude
+    ) ? "stable" : stateData.RelationshipAttitude;
+    attitudeTurnsRemaining = Mathf.Max(0, stateData.AttitudeTurnsRemaining);
+
+    if (oldValue != affectionValue)
+        OnAffectionChanged?.Invoke(affectionValue);
+
+    if (oldStage != relationshipStage)
+        OnRelationshipStageChanged?.Invoke(relationshipStage);
+
+    OnDialogueStateSynced?.Invoke(stateData);
+}
+```
+
+本地只保留了 `distant → stranger → familiar → close → intimate` 的数值回退映射，用于服务端字段为空或离线调试；正常运行时，`relationship_stage` 和 `relationship_attitude` 应当以服务端为准。这个边界能避免两端各自计算导致的状态漂移。
+
+### 对话结束后的表现也受关系影响
+
+整轮语音播放完后，`CharacterPerformanceController` 不会无条件立刻归零，而是读取 `AffectionSystem` 的阶段、最近变化量和态度，决定“保持”还是“退出”：
+
+| 关系阶段/态度        | 对话结束后的默认策略                       |
+| -------------------- | ------------------------------------------ |
+| `distant`            | 很快恢复默认表情并退出身体动作，保持距离感 |
+| `stranger`           | 短暂停留后恢复默认或柔和表情               |
+| `familiar`           | 保持稍长一点，再收回日常 `Soft` 表情       |
+| `close` / `intimate` | 保留最后表情；可停留的动作可继续保持       |
+| `cold`               | 缩短停留，强制退出身体动作                 |
+| `interested`         | 延长停留；在高关系阶段保留可停留动作       |
+
+这样同一句“你来了啊”不只由情绪标签决定。关系较低时角色可以礼貌但克制地说完就恢复默认；关系较高时则可以维持柔和表情或羞涩动作，形成跨轮次连续的角色状态。
+
 ## 调试面板和工程化价值
 
 项目里还保留了 `Debug` 目录，比如聊天调试面板和好感度调试面板。这类工具对开发很重要，因为 AI 虚拟人的问题很难只靠代码日志判断。
@@ -898,6 +2221,35 @@ Unity 侧的 `AffectionSystem.cs` 会同步后端发来的 `dialogue_state`。�
 - 空间动作锁挡住了普通动作。
 
 有调试面板后，可以更快判断问题发生在哪一层。
+
+### 推荐的排障顺序
+
+这类项目最容易犯的错误，是看到“角色没有说话”就同时修改后端、网络和 Animator。更有效的方式是沿事件链从上游向下游逐段确认：
+
+1. 在 `PythonSSEChatService` 日志中确认收到 `sentence_start`，并检查 `index`、`format`、`sample_rate`、`channels` 和表现标签。
+2. 检查 `DialoguePlaybackController` 是否创建了对应索引的缓冲，以及是否出现 `unsupported streaming audio format`、Base64 解码失败或 `underrun`。
+3. 检查 `OnSentenceStarted` 是否触发。未触发通常表示播放队列、起播阈值或音频块 final 标记有问题；已触发但无模型表现，则转到下一步。
+4. 检查 `expression` 是否能解析为 `ExpressionType`，`body_action` 是否能解析为 `BodyActionId`，并确认 Animator 参数名与 Inspector 配置一致。
+5. 若对话动作没有生效，检查是否处于 `too_close_reaction`，空间动作锁会有意阻止普通动作覆盖 `Avoid`。
+6. 若好感度 UI 和表现不一致，检查最后一条 `dialogue_state` 是否到达，以及 `AffectionSystem.SyncFromServer()` 是否被调用。
+
+`ChatDebugPanel` 用于输入与逐字显示，`AffectionDebugPanel` 可以读取、刷新、调整和重置关系状态。它们不是最终 UI，但在联调阶段能快速缩小问题范围。
+
+### 场景配置检查表
+
+要让上述脚本在新场景中工作，除了挂脚本本身，还需要确认以下引用：
+
+| 组件                                                                    | 必需引用或配置                                                       |
+| ----------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| `PythonSSEChatService`                                                  | 后端 URL、`SpatialPerceptionSensor`、启用空间状态开关                |
+| `DialoguePlaybackController`                                            | 同物体的 `AudioSource`、聊天服务、WAV 解码器                         |
+| `CharacterPerformanceController`                                        | 播放控制器、嘴型、表情、动作、拼音解析、好感度、脸部特效、凝视控制器 |
+| `SpatialPerceptionSensor`                                               | 玩家 Transform、角色 Root、凝视中心、距离阈值与视觉前向偏移          |
+| `SpatialReactionController`                                             | 传感器、表现控制器、好感系统、可选的播放与凝视控制器                 |
+| `ExpressionController` / `BodyMotionController` / `MouthSyncController` | 正确的 Animator 和与 Controller 一致的参数名                         |
+| `CharacterFaceEffectController`                                         | 星穹铁道 NPR 渲染控制器；该依赖负责脸红/阴影材质参数                 |
+
+脚本中还使用了 `NPinyin` 来取得中文声母。如果迁移到新的 Unity 工程，需要同时导入该库；如果更换渲染方案，脸部特效控制器也需要改为目标模型对应的材质接口。
 
 ## Unity 侧当前可以继续改进的地方
 
