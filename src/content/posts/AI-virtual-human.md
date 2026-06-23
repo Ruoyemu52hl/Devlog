@@ -366,6 +366,104 @@ async def chat_endpoint(request: ChatRequest):
     )
 ```
 
+## 对话流：`dialogue_stream_service.py` 如何调度一轮请求
+
+`dialogue_stream_service.py` 是后端真正的对话编排层。`process_chat_stream()` 不是简单地“调用一次 LLM 再返回字符串”，而是一个异步生成器：它持续 `yield` SSE 数据，因此 FastAPI 可以在整轮对话尚未结束时就把首句和首段 PCM 交给 Unity。
+
+一轮请求按下面的顺序运行：
+
+1. **读取关系状态**：先加载当前玩家的好感度、关系阶段和临时态度。后续 Prompt、表现映射和好感计算都以这一份服务端状态为基准。
+2. **并发构建分层记忆**：读取手动设定、自动提取设定、最近对话、语义召回和历史摘要，并限制整体等待时间，避免记忆服务拖慢整轮对话。
+3. **构建 JSONL Prompt**：把玩家消息、空间快照、关系状态和记忆上下文合并，要求 LLM 优先输出 `sentence_fast`。
+4. **启动 LLM 生产者**：`llm_jsonl_event_producer()` 持续消费模型的文本流，按换行切出 JSONL 事件，并写入 `llm_queue`。
+5. **合并 LLM 与 TTS 队列**：主循环通过 `get_next_runtime_event()` 同时等待两类事件。收到 `sentence_fast` 就立即创建 TTS 任务；收到首个 PCM chunk 就发 `sentence_start`，后续 chunk 发 `audio_chunk`。
+6. **收尾与归档**：收到 `affection_evaluation` 后后台更新关系；所有句子处理完成后发送 `dialogue_state`，再异步写入 SQLite 并触发旧对话摘要，不阻塞本次 SSE 响应。
+
+下面是这条调度链路的初始化部分。它展示了“先准备上下文、再启动 LLM 生产者”的边界；后面的队列事件分支会分别调用本篇已展示的 TTS、表现映射和关系计算代码。
+
+```python
+# services/dialogue_stream_service.py（process_chat_stream 的核心摘录）
+async def process_chat_stream(
+    user_id: str,
+    user_message: str,
+    spatial_state: dict | None = None,
+):
+    request_start = time.monotonic()
+    assistant_text_parts: list[str] = []
+    llm_task: asyncio.Task | None = None
+    tts_tasks: list[asyncio.Task] = []
+
+    try:
+        relationship_state = await load_relationship_state(user_id)
+        memory_context = await build_dialogue_memory_context(
+            user_id=user_id,
+            user_message=user_message,
+            session_id=DEFAULT_SESSION_ID,
+        )
+
+        system_prompt = build_sentence_fast_prompt(
+            manual_context=memory_context.manual_context,
+            auto_extracted_context=memory_context.auto_extracted_context,
+            recent_dialogue_context=memory_context.recent_dialogue_context,
+            semantic_memory_context=memory_context.semantic_memory_context,
+            summary_context=memory_context.summary_context,
+            dialogue_context=memory_context.semantic_memory_context,
+            affection_value=relationship_state["affection_value"],
+            relationship_stage=relationship_state["relationship_stage"],
+            relationship_attitude=relationship_state["relationship_attitude"],
+            positive_streak=relationship_state["positive_streak"],
+            negative_streak=relationship_state["negative_streak"],
+            spatial_state=spatial_state,
+        )
+
+        llm_queue: asyncio.Queue = asyncio.Queue()
+        tts_queue: asyncio.Queue = asyncio.Queue()
+        runtime_event_backlog: list[tuple[str, dict]] = []
+        sentences: dict[int, dict] = {}
+        llm_done = False
+        tts_pending_count = 0
+        evaluation = build_preliminary_evaluation(
+            relationship_state=relationship_state,
+            user_message=user_message,
+        )
+        relationship_update_task: asyncio.Task | None = None
+
+        async with use_shared_http_client() as client:
+            llm_task = asyncio.create_task(
+                llm_jsonl_event_producer(
+                    label="FAST",
+                    done_event_type=LLM_DONE_EVENT,
+                    parser=parse_sentence_fast_event_line,
+                    client=client,
+                    user_message=user_message,
+                    system_prompt=system_prompt,
+                    request_start=request_start,
+                    event_queue=llm_queue,
+                )
+            )
+
+            # 主循环：从 llm_queue / tts_queue 获取下一个可处理事件，
+            # 生成 sentence_start、audio_chunk、dialogue_state 等 SSE 包。
+            while not llm_done or tts_pending_count > 0:
+                source, event = await get_next_runtime_event(
+                    llm_queue=llm_queue,
+                    tts_queue=tts_queue,
+                    llm_done=llm_done,
+                    tts_pending_count=tts_pending_count,
+                    event_backlog=runtime_event_backlog,
+                )
+                # 按 source / event.type 处理 JSONL、PCM chunk 和关系评估。
+
+    finally:
+        if llm_task and not llm_task.done():
+            llm_task.cancel()
+        for task in tts_tasks:
+            if not task.done():
+                task.cancel()
+```
+
+这里最关键的不是“并发越多越好”，而是事件依赖顺序：同一句 `sentence_start` 必须等到对应的第一个 PCM chunk；`dialogue_state` 必须等到关系任务完成；SQLite 保存和摘要则主动放到后台。这样才能让首句开口、关系状态和长期记忆各自按正确的时机完成。
+
 ## Prompt 设计：让 LLM 输出可执行的事件流
 
 这个项目里的 Prompt 不是简单要求模型“生成一段回复”，而是要求模型输出一组后端可以直接解析和调度的 JSONL 事件。也就是说，LLM 的输出不是最终展示文本，而是后端实时对话流水线的上游事件。
@@ -855,6 +953,84 @@ async def apply_affection_evaluation(
     return await save_relationship_state(state)
 ```
 
+上面的更新函数依赖一个可解释的评分函数。它把模型给出的多个语义维度转换为候选变化值，同时保留三道安全边界：直接操控数值不生效；低好感阶段的亲密推进不会加分；模型建议与规则评分冲突时取更保守的结果。
+
+```python
+# services/relationship_service.py
+def calculate_raw_delta_from_affection_evaluation(
+    evaluation: dict[str, Any],
+    state: dict[str, Any],
+    user_message: str,
+) -> int:
+    stage = str(state.get("relationship_stage", "familiar")).strip().lower()
+
+    warmth = int(evaluation.get("warmth", 0))
+    respect = int(evaluation.get("respect", 0))
+    care = int(evaluation.get("care", 0))
+    playfulness = int(evaluation.get("playfulness", 0))
+    apology = int(evaluation.get("apology", 0))
+    boundary_pressure = int(evaluation.get("boundary_pressure", 0))
+    offense = int(evaluation.get("offense", 0))
+    manipulation = int(evaluation.get("manipulation", 0))
+    intimacy_attempt = int(evaluation.get("intimacy_attempt", 0))
+    delta_suggestion = parse_affection_delta(
+        evaluation.get("delta_suggestion", 0)
+    )
+
+    if detect_intimacy_attempt_text(user_message):
+        intimacy_attempt = max(intimacy_attempt, 1)
+
+    if manipulation > 0 or is_affection_manipulation(user_message):
+        return 0
+
+    if stage in {"distant", "stranger"} and intimacy_attempt > 0:
+        boundary_pressure = max(boundary_pressure, 1)
+        score = (
+            warmth * 0.4 + respect * 0.4 + care * 0.3 + apology * 0.6
+            - boundary_pressure * 1.8 - offense * 2.0 - intimacy_attempt * 1.2
+        )
+        if score <= -3.5:
+            return -3
+        if score <= -2.0:
+            return -2
+        if score <= -0.8:
+            return -1
+        return min(delta_suggestion, 0)
+
+    score = (
+        warmth * 0.9 + respect * 1.0 + care * 1.1
+        + playfulness * 0.5 + apology * 1.2
+        - boundary_pressure * 1.7 - offense * 2.0 - manipulation * 3.0
+    )
+    if stage in {"distant", "stranger", "familiar"} and intimacy_attempt > 0:
+        score -= intimacy_attempt * 0.8
+    elif stage in {"close", "intimate"} and intimacy_attempt > 0:
+        score += intimacy_attempt * 0.4
+
+    if score >= 4.5:
+        score_based_delta = 3
+    elif score >= 2.7:
+        score_based_delta = 2
+    elif score >= 1.1:
+        score_based_delta = 1
+    elif score <= -4.0:
+        score_based_delta = -3
+    elif score <= -2.3:
+        score_based_delta = -2
+    elif score <= -0.8:
+        score_based_delta = -1
+    else:
+        score_based_delta = 0
+
+    if score_based_delta == 0:
+        return clamp_int(delta_suggestion, -1, 1)
+    if score_based_delta > 0 and delta_suggestion < 0:
+        return 0
+    if score_based_delta < 0 and delta_suggestion > 0:
+        return score_based_delta
+    return score_based_delta
+```
+
 ## TTS 流式语音
 
 语音部分使用 MiniMax TTS WebSocket。当后端启动时会初始化一个 WebSocket 连接池，默认配置为 4 个连接，用来并发处理多句 `sentence_fast` 的语音合成任务。每当 LLM 输出一句 `sentence_fast`，后端就会创建一个 TTS 任务，把这句话发送给 MiniMax。我使用的语音模型是Speech-2.8-Turbo。
@@ -862,6 +1038,57 @@ async def apply_affection_evaluation(
 MiniMax WebSocket 返回的音频数据并不是直接可播放的 PCM，而是 **hex 字符串形式的 MP3 音频片段**。后端收到后，会先通过 `bytes.fromhex()` 还原成 MP3 bytes，再使用 `miniaudio` 做增量解码，将 MP3 音频流转换成 `pcm_s16le` 格式的 PCM 数据。
 
 之所以不直接把 MiniMax 返回的 hex 转成 base64 发给 Unity，是因为那样传过去的本质仍然是 MP3 数据，Unity 端还需要再处理 MP3 流式解码。当前项目选择在后端完成解码，把更容易播放的 PCM 数据交给 Unity。这样 Unity 端只需要把 base64 还原成 PCM 样本，并写入流式播放缓冲即可。
+
+下面的 WebSocket 读取循环体现了这个边界：每句文本通过 `task_continue` 发送；服务端返回的每个 MP3 hex 片段先还原为 bytes，再交给增量解码器。解码器只产出尚未发送过的 PCM，因此 Unity 可以边接收边播放；收到结束事件后再 `flush()`，避免最后一小段音频丢失。
+
+```python
+# services/minimax_tts_ws.py（MiniMaxTTSWebSocketConnection 内）
+async def stream_pcm_chunks(
+    self,
+    *,
+    text: str,
+    tts: dict | None = None,
+) -> AsyncGenerator[bytes, None]:
+    await self.ensure_connected()
+
+    if self.ws is None:
+        raise RuntimeError("MiniMax TTS WebSocket is not connected")
+
+    text = (text or "").strip()
+    if not text:
+        return
+
+    voice_params = normalize_tts_params(tts)
+    await self._send_json({
+        "event": "task_continue",
+        "text": text,
+        "voice_setting": self._build_voice_setting(voice_params),
+    })
+
+    decoder = IncrementalMp3ToPcmDecoder()
+
+    while True:
+        message = await asyncio.wait_for(self.ws.recv(), timeout=20.0)
+        data = self._parse_message(message)
+        self._raise_if_error(data)
+
+        audio_hex = self._extract_audio_hex(data)
+        if audio_hex:
+            try:
+                pcm = decoder.feed(bytes.fromhex(audio_hex))
+            except ValueError as e:
+                raise RuntimeError(
+                    f"MiniMax audio chunk is not valid hex: {e}"
+                ) from e
+            if pcm:
+                yield pcm
+
+        if self._is_final_message(data):
+            pcm = decoder.flush()
+            if pcm:
+                yield pcm
+            break
+```
 
 整体流程是：
 
