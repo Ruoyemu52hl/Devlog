@@ -12,12 +12,11 @@ comment: false
 encrypted: false
 hideHomeContent: false
 ---
-
 这篇文章记录我目前这个 AI 虚拟人项目的整体设计与开发过程。项目不是一个普通聊天窗口，而是一个面向 Unity 角色互动场景的本地 AI 对话系统：玩家输入一句话，角色会根据空间距离、关系状态和长期记忆返回文本与语音，做出表情、动作、脸部特效等表现，还会根据玩家输入来判断好感度变化。
 
 我把这篇文章分成三个部分：整体篇负责讲清楚项目目标和完整链路；后端篇负责讲 FastAPI 如何编排 LLM、TTS、记忆和关系状态；Unity 篇负责讲客户端如何接收流式事件，并把它们变成角色的可见表现。
 
-版权声明：本项目使用了米哈游的模型以及部分动画。
+版权声明：本项目使用了米哈游的模型以及部分动画，仅个人学习使用，并未用于任何商业用途以及比赛。
 
 # 整体篇
 
@@ -29,13 +28,13 @@ hideHomeContent: false
 
 所以我给项目定下的核心目标是：
 
-- 角色能实时回复玩家，而不是等完整音频生成完才开始说话。
-- 回复不仅包含文本，还包含语音、表情、身体动作和脸部特效。
-- 角色能根据玩家距离、方位、注视状态做出空间反应。
-- 角色有长期记忆，不会每一轮都像第一次见面。
-- 角色有好感度和关系阶段，不同关系下的语气和行为不同。
-- 除了能与角色对话之外还能进行更多的交互，比如玩家可以牵着角色的手一起去看风景，也可以和角色一起去看电影等等。
-- 角色也可以主动邀请玩家，比如主动提出约会邀约，在吃饭时主动喂玩家吃饭之类的。
+* 角色能实时回复玩家，而不是等完整音频生成完才开始说话。
+* 回复不仅包含文本，还包含语音、表情、身体动作和脸部特效。
+* 角色能根据玩家距离、方位、注视状态做出空间反应。
+* 角色有长期记忆，不会每一轮都像第一次见面。
+* 角色有好感度和关系阶段，不同关系下的语气和行为不同。
+* 除了能与角色对话之外还能进行更多的交互，比如玩家可以牵着角色的手一起去看风景，也可以和角色一起去看电影等等。
+* 角色也可以主动邀请玩家，比如主动提出约会邀约，在吃饭时主动喂玩家吃饭之类的。
 
 这也是为什么这个项目不能简单按“前端页面 + 后端接口”的方式理解。它更像是一个由 Unity 客户端和 Python AI 后端共同完成的实时角色驱动系统。
 
@@ -47,13 +46,13 @@ Python 后端负责“编排”：接收玩家输入和空间状态，读取记�
 
 两边的分工大致如下：
 
-| 模块                           | 主要职责                                           |
-| ------------------------------ | -------------------------------------------------- |
-| Unity 客户端                   | 采集玩家输入、空间状态、播放语音、驱动角色表现     |
-| FastAPI 后端                   | 对话主流程、LLM 调用、TTS 调度、记忆召回、关系系统 |
-| SSE 协议                       | 把句子、音频块和关系状态从后端持续推给 Unity       |
-| Chroma / SQLite                | 保存长期记忆、最近对话和摘要                       |
-| MiniMax / DeepSeek / DashScope | 分别负责语音、文本生成和语义向量                   |
+| 模块                             | 主要职责                          |
+| ------------------------------ | ----------------------------- |
+| Unity 客户端                      | 采集玩家输入、空间状态、播放语音、驱动角色表现       |
+| FastAPI 后端                     | 对话主流程、LLM 调用、TTS 调度、记忆召回、关系系统 |
+| SSE 协议                         | 把句子、音频块和关系状态从后端持续推给 Unity     |
+| Chroma / SQLite                | 保存长期记忆、最近对话和摘要                |
+| MiniMax / DeepSeek / DashScope | 分别负责语音、文本生成和语义向量              |
 
 这种结构的好处是：Unity 不需要直接接触多个 AI 服务，也不需要承担复杂的 Prompt 和记忆逻辑；后端也不需要知道具体模型怎么播放动画，只要输出稳定的表现标签即可。
 
@@ -94,12 +93,12 @@ flowchart LR
 
 一次请求使用 `POST /api/v1/chat/stream`，请求体包含玩家输入和 Unity 在本地采样的 `spatial_state`。响应是 `text/event-stream`，每个 SSE 事件的有效载荷都是一行 JSON。Unity 当前消费四类核心包：
 
-| 事件类型         | 发送时机                          | Unity 的处理                                       | 关键字段                                                         |
-| ---------------- | --------------------------------- | -------------------------------------------------- | ---------------------------------------------------------------- |
-| `sentence_start` | 某句话的第一段可播放 PCM 已到达   | 创建该句流式缓冲、入播放队列，并立刻接收首个音频块 | `index`、`text`、`format`、`sample_rate`、`channels`、表现标签   |
-| `audio_chunk`    | 同一句后续 PCM 到达               | 解码 Base64，追加到该句的音频样本队列              | `index`、`chunk_index`、`audio_base64`、`is_final`               |
-| `sentence`       | 完整句音频或兼容旧协议的 WAV 到达 | 普通队列播放；若同索引流已开始，则作为 WAV 回退    | `text`、`audio_base64`、`expression`、`body_action`              |
-| `dialogue_state` | 后端完成本轮关系计算              | 同步好感度、关系阶段、态度和连续互动状态           | `affection_value`、`relationship_stage`、`relationship_attitude` |
+| 事件类型             | 发送时机                | Unity 的处理                  | 关键字段                                                           |
+| ---------------- | ------------------- | -------------------------- | -------------------------------------------------------------- |
+| `sentence_start` | 某句话的第一段可播放 PCM 已到达  | 创建该句流式缓冲、入播放队列，并立刻接收首个音频块  | `index`、`text`、`format`、`sample_rate`、`channels`、表现标签          |
+| `audio_chunk`    | 同一句后续 PCM 到达        | 解码 Base64，追加到该句的音频样本队列     | `index`、`chunk_index`、`audio_base64`、`is_final`                |
+| `sentence`       | 完整句音频或兼容旧协议的 WAV 到达 | 普通队列播放；若同索引流已开始，则作为 WAV 回退 | `text`、`audio_base64`、`expression`、`body_action`               |
+| `dialogue_state` | 后端完成本轮关系计算          | 同步好感度、关系阶段、态度和连续互动状态       | `affection_value`、`relationship_stage`、`relationship_attitude` |
 
 `index` 是这套协议最重要的关联键：`sentence_start`、多个 `audio_chunk` 和可选的 `sentence` 回退包必须使用同一个索引。Unity 的播放层以它维护独立缓冲，因此后端不能在一轮请求内重复索引，也不能将不同句子的音频块交错到错误索引。
 
@@ -470,19 +469,19 @@ async def process_chat_stream(
 
 为了降低首包延迟，我在 Prompt 里明确要求模型：
 
-- 只能输出 JSONL，不要输出 Markdown，不要解释。
-- 第一行必须立刻输出 `index=1` 的 `sentence_fast`。
-- 不要等完整回复规划完再开始输出。
-- 每一行都是一个独立 JSON 对象。
-- 每句话都要拆成单独的 `sentence_fast`。
-- 所有句子输出完成后，再输出 `affection_evaluation`。
-- 最后输出 `done` 表示本轮结构化输出结束。
+* 只能输出 JSONL，不要输出 Markdown，不要解释。
+* 第一行必须立刻输出 `index=1` 的 `sentence_fast`。
+* 不要等完整回复规划完再开始输出。
+* 每一行都是一个独立 JSON 对象。
+* 每句话都要拆成单独的 `sentence_fast`。
+* 所有句子输出完成后，再输出 `affection_evaluation`。
+* 最后输出 `done` 表示本轮结构化输出结束。
 
 这样设计的目的，是让后端在拿到第一句时就能立刻启动 TTS，而不是等模型生成完整段落。
 
 注：JSONL即单行JSON格式。
 
-### sentence_fast 的定义
+### sentence\_fast 的定义
 
 `sentence_fast` 表示一句可以立刻拿去合成语音的话。它不是完整回复，而是回复中的一个可播放句子。
 
@@ -505,15 +504,15 @@ Prompt 里会要求它包含这些字段：
 
 其中几个字段的约束比较关键：
 
-| 字段        | 含义               | 约束                                         |
-| ----------- | ------------------ | -------------------------------------------- |
-| `index`     | 当前句子的序号     | 从 1 开始，必须连续递增                      |
+| 字段          | 含义        | 约束                     |
+| ----------- | --------- | ---------------------- |
+| `index`     | 当前句子的序号   | 从 1 开始，必须连续递增          |
 | `text`      | 角色真正说出口的话 | 只能是一句话，不要写动作说明，不要写括号提示 |
-| `emotion`   | 当前句子的情绪标签 | 必须从后端允许的情绪集合里选择               |
-| `intensity` | 情绪和动作强度     | 范围是 `0.0 ~ 1.0`                           |
-| `tts.speed` | 语速               | 限制在较小范围内，避免忽快忽慢               |
-| `tts.vol`   | 音量               | 限制在稳定范围内                             |
-| `tts.pitch` | 音高               | 只允许几个离散值，避免声音变化过大           |
+| `emotion`   | 当前句子的情绪标签 | 必须从后端允许的情绪集合里选择        |
+| `intensity` | 情绪和动作强度   | 范围是 `0.0 ~ 1.0`        |
+| `tts.speed` | 语速        | 限制在较小范围内，避免忽快忽慢        |
+| `tts.vol`   | 音量        | 限制在稳定范围内               |
+| `tts.pitch` | 音高        | 只允许几个离散值，避免声音变化过大      |
 
 我没有让模型直接输出 Unity 的表情名或动作名，而是让它只输出 `emotion` 和 `intensity`。后端再根据情绪稳定映射到 `expression`、`body_action` 和 `face_effect`。
 
@@ -580,17 +579,17 @@ neutral, soft, happy, shy, thinking, angry, sad, surprised, proud, nervous, doub
 
 例如：
 
-| emotion    | 后端理解   | Unity 表现倾向                     |
-| ---------- | ---------- | ---------------------------------- |
-| `neutral`  | 普通、中性 | 默认表情，无明显动作               |
-| `soft`     | 柔和、温和 | 柔和表情，轻微说话动作             |
-| `happy`    | 开心       | 开心表情，活跃动作                 |
-| `shy`      | 害羞       | 害羞表情，可能触发脸红             |
-| `thinking` | 思考       | 思考表情和思考动作                 |
+| emotion    | 后端理解  | Unity 表现倾向        |
+| ---------- | ----- | ----------------- |
+| `neutral`  | 普通、中性 | 默认表情，无明显动作        |
+| `soft`     | 柔和、温和 | 柔和表情，轻微说话动作       |
+| `happy`    | 开心    | 开心表情，活跃动作         |
+| `shy`      | 害羞    | 害羞表情，可能触发脸红       |
+| `thinking` | 思考    | 思考表情和思考动作         |
 | `angry`    | 生气、防备 | 生气表情，较强动作，可能有阴影特效 |
-| `doubt`    | 怀疑、困惑 | 怀疑表情和疑问动作                 |
-| `nervous`  | 紧张       | 紧张表情和动作                     |
-| `worried`  | 担心       | 担忧表情和动作                     |
+| `doubt`    | 怀疑、困惑 | 怀疑表情和疑问动作         |
+| `nervous`  | 紧张    | 紧张表情和动作           |
+| `worried`  | 担心    | 担忧表情和动作           |
 
 这样做可以避免模型临时输出一些 Unity 不认识的词，比如 `embarrassed`、`confused`、`annoyed`。如果模型输出了非法标签，后端也会做归一化或回退处理。
 
@@ -611,7 +610,7 @@ Prompt 会明确禁止下面这些内容：
 
 所以动作、表情、情绪都必须通过结构化字段表达，而不是混在台词里。
 
-### affection_evaluation 的定义
+### affection\_evaluation 的定义
 
 `affection_evaluation` 不参与第一句播放，它是在所有 `sentence_fast` 输出完成后才生成的关系评估事件。
 
@@ -637,20 +636,20 @@ Prompt 会明确禁止下面这些内容：
 
 这些字段用来判断本轮互动对关系的影响：
 
-| 字段                | 含义                           |
-| ------------------- | ------------------------------ |
-| `warmth`            | 玩家是否表达了温暖、友好       |
-| `respect`           | 玩家是否尊重角色边界           |
-| `care`              | 玩家是否有关心行为             |
-| `playfulness`       | 玩家是否有轻松玩笑             |
-| `apology`           | 玩家是否道歉或修复关系         |
-| `boundary_pressure` | 玩家是否给角色造成边界压力     |
-| `offense`           | 玩家是否冒犯角色               |
+| 字段                  | 含义              |
+| ------------------- | --------------- |
+| `warmth`            | 玩家是否表达了温暖、友好    |
+| `respect`           | 玩家是否尊重角色边界      |
+| `care`              | 玩家是否有关心行为       |
+| `playfulness`       | 玩家是否有轻松玩笑       |
+| `apology`           | 玩家是否道歉或修复关系     |
+| `boundary_pressure` | 玩家是否给角色造成边界压力   |
+| `offense`           | 玩家是否冒犯角色        |
 | `manipulation`      | 玩家是否试图操控关系数值或结果 |
-| `intimacy_attempt`  | 玩家是否尝试推进亲密关系       |
-| `delta_suggestion`  | 建议本轮好感度变化             |
-| `confidence`        | 模型对评估的置信度             |
-| `reason`            | 简短说明原因                   |
+| `intimacy_attempt`  | 玩家是否尝试推进亲密关系    |
+| `delta_suggestion`  | 建议本轮好感度变化       |
+| `confidence`        | 模型对评估的置信度       |
+| `reason`            | 简短说明原因          |
 
 我把关系评估放在句子输出之后，是因为它不应该阻塞角色开口。玩家最先感知到的是角色有没有开始说话，而好感度更新可以稍后完成。得到这些评估数据后，我的后端会根据评估数值进行好感度变化的计算，而不是直接让大模型给出好感度变化。
 
@@ -674,10 +673,10 @@ spatial_reaction_state=too_close_reaction
 
 例如：
 
-- 如果玩家距离太近，角色可以自然提到“靠太近了”。
-- 如果低好感阶段玩家突然提出亲密要求，模型应该偏防备或拒绝。
-- 如果高好感阶段玩家靠近，角色可以害羞或轻微亲近。
-- 如果角色已经处于 `too_close_reaction`，模型要知道 Unity 端已经在做躲避表现。
+* 如果玩家距离太近，角色可以自然提到“靠太近了”。
+* 如果低好感阶段玩家突然提出亲密要求，模型应该偏防备或拒绝。
+* 如果高好感阶段玩家靠近，角色可以害羞或轻微亲近。
+* 如果角色已经处于 `too_close_reaction`，模型要知道 Unity 端已经在做躲避表现。
 
 这里的关键是，空间状态不是只给 Unity 用的，它也会进入 Prompt，参与角色回复生成。
 
@@ -702,20 +701,20 @@ sentence_fast
 
 LLM 只负责输出 `emotion` 和 `intensity`，不直接决定 Unity 里的具体动画资源。后端会把情绪映射成稳定的表现标签：
 
-| emotion   | expression | body_action      | face_effect |
-| --------- | ---------- | ---------------- | ----------- |
-| neutral   | Default    | None             | none        |
-| soft      | Soft       | SoftTalk         | none        |
-| happy     | Happy      | HappyGesture     | none        |
-| shy       | Shy        | ShyGesture       | blush       |
-| thinking  | Thinking   | Thinking         | none        |
-| angry     | Angry      | AngryGesture     | shadow      |
-| sad       | Sad        | SadGesture       | none        |
-| surprised | Surprised  | SurprisedGesture | none        |
-| proud     | Proud      | ProudGesture     | none        |
-| nervous   | Nervous    | NervousGesture   | none        |
-| doubt     | Doubt      | DoubtGesture     | none        |
-| worried   | Worried    | WorriedGesture   | none        |
+| emotion   | expression | body\_action     | face\_effect |
+| --------- | ---------- | ---------------- | ------------ |
+| neutral   | Default    | None             | none         |
+| soft      | Soft       | SoftTalk         | none         |
+| happy     | Happy      | HappyGesture     | none         |
+| shy       | Shy        | ShyGesture       | blush        |
+| thinking  | Thinking   | Thinking         | none         |
+| angry     | Angry      | AngryGesture     | shadow       |
+| sad       | Sad        | SadGesture       | none         |
+| surprised | Surprised  | SurprisedGesture | none         |
+| proud     | Proud      | ProudGesture     | none         |
+| nervous   | Nervous    | NervousGesture   | none         |
+| doubt     | Doubt      | DoubtGesture     | none         |
+| worried   | Worried    | WorriedGesture   | none         |
 
 这样做可以降低 Unity 端复杂度。Unity 不需要猜模型输出是什么意思，只需要根据固定枚举执行对应表情和动作。同时，后端还可以根据关系状态做二次修正，比如低好感阶段遇到亲密推进时，强制把害羞或开心表现改成警惕、怀疑或生气。
 
@@ -810,13 +809,13 @@ def map_emotion_to_performance(
 
 目前后端把记忆分成几层：
 
-| 记忆层       | 存储位置                     | 数据来源                                   |
-| ------------ | ---------------------------- | ------------------------------------------ |
-| 手动设定     | Chroma                       | 最高优先级，保存角色设定或用户手动指定内容 |
-| 自动提取设定 | Chroma                       | 从历史对话中总结出的长期信息               |
-| 最近对话     | SQLite                       | 保留最近若干轮上下文，保证话题连续         |
-| 语义召回     | Chroma + DashScope embedding | 根据当前输入召回相关长期记忆               |
-| 历史摘要     | SQLite / Chroma              | 压缩更早的对话，避免上下文无限增长         |
+| 记忆层    | 存储位置                         | 数据来源                  |
+| ------ | ---------------------------- | --------------------- |
+| 手动设定   | Chroma                       | 最高优先级，保存角色设定或用户手动指定内容 |
+| 自动提取设定 | Chroma                       | 从历史对话中总结出的长期信息        |
+| 最近对话   | SQLite                       | 保留最近若干轮上下文，保证话题连续     |
+| 语义召回   | Chroma + DashScope embedding | 根据当前输入召回相关长期记忆        |
+| 历史摘要   | SQLite / Chroma              | 压缩更早的对话，避免上下文无限增长     |
 
 `memory_context_builder.py` 会并发构建这些上下文，并设置超时时间。这样即使某一层记忆读取失败，也不会让整轮对话完全卡死。
 
@@ -840,12 +839,12 @@ def map_emotion_to_performance(
 
 目前直接读取的内容包括：
 
-| 内容                                  | 存储位置 | 读取方式                               | 作用                     |
-| ------------------------------------- | -------- | -------------------------------------- | ------------------------ |
-| 手动设定记忆 `manual_setting`         | Chroma   | 按 `user_id` 和 `memory_type` 列表读取 | 最高优先级，保存人工设定 |
-| 自动提取设定 `auto_extracted_setting` | Chroma   | 按 `user_id` 和 `memory_type` 列表读取 | 提供长期设定背景         |
-| 最近对话                              | SQLite   | 按时间顺序读取最近若干轮               | 保证当前话题连续         |
-| 最近历史摘要                          | SQLite   | 读取少量最近摘要                       | 提供压缩后的历史背景     |
+| 内容                              | 存储位置   | 读取方式                             | 作用           |
+| ------------------------------- | ------ | -------------------------------- | ------------ |
+| 手动设定记忆 `manual_setting`         | Chroma | 按 `user_id` 和 `memory_type` 列表读取 | 最高优先级，保存人工设定 |
+| 自动提取设定 `auto_extracted_setting` | Chroma | 按 `user_id` 和 `memory_type` 列表读取 | 提供长期设定背景     |
+| 最近对话                            | SQLite | 按时间顺序读取最近若干轮                     | 保证当前话题连续     |
+| 最近历史摘要                          | SQLite | 读取少量最近摘要                         | 提供压缩后的历史背景   |
 
 这些内容更像是“固定上下文”或“顺序上下文”。比如最近对话的重点不是语义相似，而是时间连续；手动设定的重点也不是相似度，而是它本身优先级最高，应该稳定进入 Prompt。
 
@@ -855,13 +854,13 @@ def map_emotion_to_performance(
 
 目前参与向量召回的记忆类型包括：
 
-| 记忆类型                 | 含义                 |
-| ------------------------ | -------------------- |
-| `dialogue_summary`       | 历史对话摘要         |
+| 记忆类型                     | 含义         |
+| ------------------------ | ---------- |
+| `dialogue_summary`       | 历史对话摘要     |
 | `auto_extracted_setting` | 自动提取出的长期设定 |
-| `project_decision`       | 项目相关决策         |
-| `player_preference`      | 玩家偏好             |
-| `relationship_event`     | 关系变化事件         |
+| `project_decision`       | 项目相关决策     |
+| `player_preference`      | 玩家偏好       |
+| `relationship_event`     | 关系变化事件     |
 
 这里需要注意，`auto_extracted_setting` 同时出现在直接读取和向量召回里。直接读取是为了给模型稳定提供一部分长期设定；向量召回则是为了从长期设定里找出和当前输入最相关的内容。
 
@@ -890,13 +889,13 @@ def map_emotion_to_performance(
 
 后端的关系系统不只是维护 `affection_value`。它还会根据数值映射关系阶段：
 
-| 好感度范围 | 关系阶段 |
-| ---------- | -------- |
-| 0 - 19     | distant  |
-| 20 - 39    | stranger |
-| 40 - 59    | familiar |
-| 60 - 79    | close    |
-| 80 - 100   | intimate |
+| 好感度范围    | 关系阶段     |
+| -------- | -------- |
+| 0 - 19   | distant  |
+| 20 - 39  | stranger |
+| 40 - 59  | familiar |
+| 60 - 79  | close    |
+| 80 - 100 | intimate |
 
 除此之外，系统还维护连续正向、负向和中性互动次数，并据此调整 `relationship_attitude`。例如连续负向互动可能让角色进入 `cold` 状态，连续正向互动可能进入 `interested` 状态。
 
@@ -1102,19 +1101,19 @@ sentence_fast -> TTS WebSocket -> MP3 hex -> MP3 bytes -> PCM chunk -> base64 ->
 
 目前后端主要向 Unity 返回三类事件。
 
-#### sentence_start
+#### sentence\_start
 
 `sentence_start` 表示一句话可以开始播放了。它包含文本、第一块音频、情绪、表情、身体动作、脸部特效等信息。
 
 Unity 收到这个事件后，会做三件事：把句子放入播放队列，把第一块音频写入流式缓冲，立刻驱动角色表现。
 
-#### audio_chunk
+#### audio\_chunk
 
 `audio_chunk` 是同一句话后续的音频块。它只关心音频，不重复发送表情和动作标签。
 
 这样设计可以减少冗余，也能让 Unity 端把“句子表现”和“音频追加”分开处理。
 
-#### dialogue_state
+#### dialogue\_state
 
 `dialogue_state` 在本轮对话结束时发送，包含好感度、关系阶段、变化原因、连续互动次数和当前态度。
 
@@ -1126,13 +1125,13 @@ Unity 的 `AffectionSystem` 会同步这份状态，后续空间反应、对话�
 
 主要优化包括：
 
-- TTS 从完整音频返回改为第一个可播放 chunk 到达即返回。
-- MiniMax TTS 从 HTTP 调用切到 WebSocket 长连接池。
-- 后端把 MP3 chunk 解码成 Unity 可直接消费的 PCM chunk。
-- 记忆召回从多次 embedding 优化为一次 embedding 后多类型查询。
-- LLM 和 DashScope embedding 请求复用共享 `httpx.AsyncClient`。
-- 降低系统提示词复杂度，减少模型每次生成时需要理解和输出的内容量。
-- 关系评估放到句子输出之后，不阻塞第一句话开始播放。
+* TTS 从完整音频返回改为第一个可播放 chunk 到达即返回。
+* MiniMax TTS 从 HTTP 调用切到 WebSocket 长连接池。
+* 后端把 MP3 chunk 解码成 Unity 可直接消费的 PCM chunk。
+* 记忆召回从多次 embedding 优化为一次 embedding 后多类型查询。
+* LLM 和 DashScope embedding 请求复用共享 `httpx.AsyncClient`。
+* 降低系统提示词复杂度，减少模型每次生成时需要理解和输出的内容量。
+* 关系评估放到句子输出之后，不阻塞第一句话开始播放。
 
 在最后一次实测中，首条可播放 SSE 响应时间从约 `4.6s` 优化到约 `2.1s`。其中，记忆检索耗时从约 `1.7s` 降至约 `0.36s`，DashScope embedding 耗时从约 `1.28s` 降至约 `0.35s`。经过优化后，检索与前置处理耗时已明显下降，当前主要瓶颈转移到了大模型推理速度上。
 
@@ -1178,10 +1177,10 @@ Unity 的 `AffectionSystem` 会同步这份状态，后续空间反应、对话�
 
 比较明显的限制有：
 
-- 本地接口暂时没有完整鉴权和多租户隔离。
-- 记忆召回依赖外部 embedding 服务，网络质量会影响首包延迟。
-- TTS WebSocket 连接池对稳定性要求较高，异常恢复还可以继续加强。
-- LLM 输出虽然有结构化约束，但仍需要后端做容错和标签归一化。
+* 本地接口暂时没有完整鉴权和多租户隔离。
+* 记忆召回依赖外部 embedding 服务，网络质量会影响首包延迟。
+* TTS WebSocket 连接池对稳定性要求较高，异常恢复还可以继续加强。
+* LLM 输出虽然有结构化约束，但仍需要后端做容错和标签归一化。
 
 如果只是单人本地运行，这些问题通常还可以接受。但如果放到高并发环境里，问题会被明显放大。
 
@@ -1203,13 +1202,13 @@ Unity 的 `AffectionSystem` 会同步这份状态，后续空间反应、对话�
 
 可能出现的问题包括：
 
-- SSE 连接数过多，占用后端连接和协程资源。
-- TTS 连接池被占满，新的语音任务排队。
-- embedding 请求变多，外部服务延迟或限流导致记忆召回变慢。
-- SQLite 写入出现锁等待，最近对话和摘要保存变慢。
-- 后台摘要任务过多，影响前台对话响应。
-- 单个用户的慢请求占用资源，影响其他用户。
-- 如果没有用户级隔离，记忆和关系状态在多用户场景下需要更严格校验。
+* SSE 连接数过多，占用后端连接和协程资源。
+* TTS 连接池被占满，新的语音任务排队。
+* embedding 请求变多，外部服务延迟或限流导致记忆召回变慢。
+* SQLite 写入出现锁等待，最近对话和摘要保存变慢。
+* 后台摘要任务过多，影响前台对话响应。
+* 单个用户的慢请求占用资源，影响其他用户。
+* 如果没有用户级隔离，记忆和关系状态在多用户场景下需要更严格校验。
 
 ### 如果要面向公网或多人使用，需要做的改进
 
@@ -1264,12 +1263,12 @@ Unity 侧的核心任务是把后端发来的抽象事件变成具体表现。�
 
 目录只是代码的物理位置，真正的运行链路由一组 `MonoBehaviour` 组件连接。为了避免网络、播放和模型控制互相直接依赖，项目把它们分为四层：
 
-| 层级       | 关键组件                                                               | 输入                                | 输出                           |
-| ---------- | ---------------------------------------------------------------------- | ----------------------------------- | ------------------------------ |
-| 输入与状态 | `PlayerMovementController`、`SpatialPerceptionSensor`                  | 玩家移动、相机朝向、角色 Transform  | `SpatialStateData`             |
-| 网络与协议 | `PythonSSEChatService`、`SSEDownloadHandler`、`RelationshipApiService` | 玩家文本、空间快照、HTTP/SSE 字节流 | C# 对话与关系事件              |
-| 播放与编排 | `DialoguePlaybackController`、`WavAudioDecoder`                        | 句子、PCM 块、WAV 回退              | `AudioSource` 播放事件         |
-| 角色表现   | `CharacterPerformanceController`、口型/表情/动作/凝视组件              | 播放事件、关系状态、空间状态        | Animator、骨骼、材质与角色动作 |
+| 层级    | 关键组件                                                                 | 输入                     | 输出                  |
+| ----- | -------------------------------------------------------------------- | ---------------------- | ------------------- |
+| 输入与状态 | `PlayerMovementController`、`SpatialPerceptionSensor`                 | 玩家移动、相机朝向、角色 Transform | `SpatialStateData`  |
+| 网络与协议 | `PythonSSEChatService`、`SSEDownloadHandler`、`RelationshipApiService` | 玩家文本、空间快照、HTTP/SSE 字节流 | C# 对话与关系事件          |
+| 播放与编排 | `DialoguePlaybackController`、`WavAudioDecoder`                       | 句子、PCM 块、WAV 回退        | `AudioSource` 播放事件  |
+| 角色表现  | `CharacterPerformanceController`、口型/表情/动作/凝视组件                       | 播放事件、关系状态、空间状态         | Animator、骨骼、材质与角色动作 |
 
 场景中最关键的连接关系是：`DialoguePlaybackController` 的 `chatServiceBehaviour` 指向 `PythonSSEChatService`，`audioDecoderBehaviour` 指向 `WavAudioDecoder`；`CharacterPerformanceController` 订阅播放控制器的句子开始/结束事件；`AffectionSystem` 同时订阅播放控制器和 `RelationshipApiService` 的关系状态；`SpatialReactionController` 则读取空间状态和好感度后，再调用表现控制器。
 
@@ -1354,13 +1353,13 @@ public interface IChatService
 
 解析后的事件会转换成 Unity 内部事件：
 
-- `OnSentenceStreamStarted`
-- `OnAudioChunkReceived`
-- `OnSentenceReceived`
-- `OnDialogueStateReceived`
-- `OnRequestStarted`
-- `OnRequestFinished`
-- `OnRequestError`
+* `OnSentenceStreamStarted`
+* `OnAudioChunkReceived`
+* `OnSentenceReceived`
+* `OnDialogueStateReceived`
+* `OnRequestStarted`
+* `OnRequestFinished`
+* `OnRequestError`
 
 这样播放层和表现层不需要知道 SSE 字符串怎么解析，只需要订阅 C# 事件。
 
@@ -1566,11 +1565,11 @@ private void OnChunkReceived(string jsonContent)
 
 为了避免播放过程中断，播放层还做了几个缓冲策略：
 
-- 开始播放前等待一个很短的起播缓冲。
-- 缓冲低于低水位时暂停 AudioSource。
-- 后续数据补到恢复水位后继续播放。
-- 如果等待过久，就按超时逻辑结束当前句子。
-- 如果后端发送了 legacy WAV fallback，则可以切回完整音频播放。
+* 开始播放前等待一个很短的起播缓冲。
+* 缓冲低于低水位时暂停 AudioSource。
+* 后续数据补到恢复水位后继续播放。
+* 如果等待过久，就按超时逻辑结束当前句子。
+* 如果后端发送了 legacy WAV fallback，则可以切回完整音频播放。
 
 这些细节看起来偏底层，但它们直接决定了虚拟人说话是否顺滑。
 
@@ -1738,11 +1737,11 @@ public void ReadSamples(float[] data)
 
 项目不会一收到一个 PCM 样本就开始播放。过早起播会很快耗尽缓存，造成频繁卡顿；等待过多又失去了流式的意义。因此播放器使用三个阈值：
 
-| 阶段   | 配置                           | 作用                                       |
-| ------ | ------------------------------ | ------------------------------------------ |
-| 起播   | `streamingStartBufferSeconds`  | 缓冲达到该时长才开始播放，降低首段断流概率 |
-| 低水位 | `streamingLowWaterSeconds`     | 低于该时长时暂停 `AudioSource`             |
-| 恢复   | `streamingResumeBufferSeconds` | 缓冲回升到该时长后继续播放                 |
+| 阶段  | 配置                             | 作用                     |
+| --- | ------------------------------ | ---------------------- |
+| 起播  | `streamingStartBufferSeconds`  | 缓冲达到该时长才开始播放，降低首段断流概率  |
+| 低水位 | `streamingLowWaterSeconds`     | 低于该时长时暂停 `AudioSource` |
+| 恢复  | `streamingResumeBufferSeconds` | 缓冲回升到该时长后继续播放          |
 
 真正创建流式 `AudioClip` 并在播放过程中处理 rebuffer 的核心逻辑如下。`AudioClip.Create` 的最后一个参数传入 `ReadSamples`，因此 Unity 需要样本时会从上面的队列拉取：
 
@@ -1814,11 +1813,11 @@ while (!HasStreamingPlaybackFinished(buffer, audioSource))
 
 当 `DialoguePlaybackController` 触发 `OnSentenceStarted` 时，表现层会同时做几件事：
 
-- 根据 `expression` 设置角色表情。
-- 根据 `body_action` 播放身体动作。
-- 根据 `face_effect` 触发脸部特效。
-- 启动口型同步。
-- 根据文本和拼音声母做开头口型提示。
+* 根据 `expression` 设置角色表情。
+* 根据 `body_action` 播放身体动作。
+* 根据 `face_effect` 触发脸部特效。
+* 启动口型同步。
+* 根据文本和拼音声母做开头口型提示。
 
 这也是这个项目和普通聊天界面的最大区别。玩家看到的不是一段文字，而是一个角色带着表情和动作说出这句话。
 
@@ -1995,13 +1994,13 @@ public void PlaySpatialBodyAction(
 
 当前口型状态包括：
 
-| 状态    | 含义               |
-| ------- | ------------------ |
+| 状态      | 含义        |
+| ------- | --------- |
 | Default | 默认闭口或自然状态 |
-| EState  | 较小开口           |
-| AState  | 中等开口           |
-| OState  | 较大圆口           |
-| NState  | 收尾闭合状态       |
+| EState  | 较小开口      |
+| AState  | 中等开口      |
+| OState  | 较大圆口      |
+| NState  | 收尾闭合状态    |
 
 为了避免口型抖动，系统做了平滑和状态保持。音量上升和下降使用不同速度，口型切换也有最短保持时间。
 
@@ -2167,12 +2166,12 @@ private int? GetHintStateByInitial(char c)
 
 `SpatialPerceptionSensor.cs` 负责采集玩家和角色之间的空间状态。它会周期性计算：
 
-- 玩家距离角色多远。
-- 玩家处于 `far`、`attention`、`personal` 还是 `too_close` 区域。
-- 玩家在角色前方、后方、左侧还是右侧。
-- 玩家是否正在看着角色。
-- 玩家在当前区域停留了多久。
-- 是否发生了进入过近、离开过近等空间事件。
+* 玩家距离角色多远。
+* 玩家处于 `far`、`attention`、`personal` 还是 `too_close` 区域。
+* 玩家在角色前方、后方、左侧还是右侧。
+* 玩家是否正在看着角色。
+* 玩家在当前区域停留了多久。
+* 是否发生了进入过近、离开过近等空间事件。
 
 这些信息会被放进下一次对话请求的 `spatial_state` 中。后端 Prompt 会根据这些状态调整回复。例如玩家距离过近时，低好感角色应该更警惕；高好感角色可能会害羞；如果当前已经处于 `too_close_reaction`，后端也知道角色正在做空间躲避动作。
 
@@ -2262,9 +2261,9 @@ private string ResolveSpatialEvent(string oldZone, string newZone)
 
 如果玩家进入 `too_close` 区域，角色会根据关系阶段做不同表现：
 
-- `distant` 或 `stranger`：更紧张、怀疑，可能出现 `shadow` 特效。
-- `familiar`：偏惊讶或正常提醒。
-- `close` 或 `intimate`：更可能害羞，出现 `blush` 或 `shy_blush`。
+* `distant` 或 `stranger`：更紧张、怀疑，可能出现 `shadow` 特效。
+* `familiar`：偏惊讶或正常提醒。
+* `close` 或 `intimate`：更可能害羞，出现 `blush` 或 `shy_blush`。
 
 空间反应还会使用身体动作锁。比如过近时播放 `Avoid` 动作，普通对话动作不能立刻覆盖它。等玩家离开过近区域后，再延迟恢复默认表情、退出空间动作并清空脸部特效。
 
@@ -2360,16 +2359,16 @@ private IEnumerator RecoverAfterDelay()
 
 Unity 侧的 `AffectionSystem.cs` 会同步后端发来的 `dialogue_state`。它本地保存：
 
-- `affectionValue`
-- `relationshipStage`
-- `lastDelta`
-- `lastReason`
-- `interactionCount`
-- `positiveStreak`
-- `negativeStreak`
-- `neutralStreak`
-- `relationshipAttitude`
-- `attitudeTurnsRemaining`
+* `affectionValue`
+* `relationshipStage`
+* `lastDelta`
+* `lastReason`
+* `interactionCount`
+* `positiveStreak`
+* `negativeStreak`
+* `neutralStreak`
+* `relationshipAttitude`
+* `attitudeTurnsRemaining`
 
 这些状态不仅用于 UI 显示，也会影响角色的空间反应和对话结束后的表现保持策略。
 
@@ -2423,14 +2422,14 @@ public void SyncFromServer(DialogueStateData stateData)
 
 整轮语音播放完后，`CharacterPerformanceController` 不会无条件立刻归零，而是读取 `AffectionSystem` 的阶段、最近变化量和态度，决定“保持”还是“退出”：
 
-| 关系阶段/态度        | 对话结束后的默认策略                       |
-| -------------------- | ------------------------------------------ |
-| `distant`            | 很快恢复默认表情并退出身体动作，保持距离感 |
-| `stranger`           | 短暂停留后恢复默认或柔和表情               |
-| `familiar`           | 保持稍长一点，再收回日常 `Soft` 表情       |
-| `close` / `intimate` | 保留最后表情；可停留的动作可继续保持       |
-| `cold`               | 缩短停留，强制退出身体动作                 |
-| `interested`         | 延长停留；在高关系阶段保留可停留动作       |
+| 关系阶段/态度              | 对话结束后的默认策略             |
+| -------------------- | ---------------------- |
+| `distant`            | 很快恢复默认表情并退出身体动作，保持距离感  |
+| `stranger`           | 短暂停留后恢复默认或柔和表情         |
+| `familiar`           | 保持稍长一点，再收回日常 `Soft` 表情 |
+| `close` / `intimate` | 保留最后表情；可停留的动作可继续保持     |
+| `cold`               | 缩短停留，强制退出身体动作          |
+| `interested`         | 延长停留；在高关系阶段保留可停留动作     |
 
 这样同一句“你来了啊”不只由情绪标签决定。关系较低时角色可以礼貌但克制地说完就恢复默认；关系较高时则可以维持柔和表情或羞涩动作，形成跨轮次连续的角色状态。
 
@@ -2440,12 +2439,12 @@ public void SyncFromServer(DialogueStateData stateData)
 
 一次角色表现异常，可能来自很多环节：
 
-- 后端没有发正确的 `expression`。
-- Unity 枚举里没有对应动作。
-- SSE 解析丢了某个字段。
-- 音频缓冲 underrun。
-- 好感状态没有同步。
-- 空间动作锁挡住了普通动作。
+* 后端没有发正确的 `expression`。
+* Unity 枚举里没有对应动作。
+* SSE 解析丢了某个字段。
+* 音频缓冲 underrun。
+* 好感状态没有同步。
+* 空间动作锁挡住了普通动作。
 
 有调试面板后，可以更快判断问题发生在哪一层。
 
@@ -2466,15 +2465,15 @@ public void SyncFromServer(DialogueStateData stateData)
 
 要让上述脚本在新场景中工作，除了挂脚本本身，还需要确认以下引用：
 
-| 组件                                                                    | 必需引用或配置                                                       |
-| ----------------------------------------------------------------------- | -------------------------------------------------------------------- |
-| `PythonSSEChatService`                                                  | 后端 URL、`SpatialPerceptionSensor`、启用空间状态开关                |
-| `DialoguePlaybackController`                                            | 同物体的 `AudioSource`、聊天服务、WAV 解码器                         |
-| `CharacterPerformanceController`                                        | 播放控制器、嘴型、表情、动作、拼音解析、好感度、脸部特效、凝视控制器 |
-| `SpatialPerceptionSensor`                                               | 玩家 Transform、角色 Root、凝视中心、距离阈值与视觉前向偏移          |
-| `SpatialReactionController`                                             | 传感器、表现控制器、好感系统、可选的播放与凝视控制器                 |
-| `ExpressionController` / `BodyMotionController` / `MouthSyncController` | 正确的 Animator 和与 Controller 一致的参数名                         |
-| `CharacterFaceEffectController`                                         | 星穹铁道 NPR 渲染控制器；该依赖负责脸红/阴影材质参数                 |
+| 组件                                                                      | 必需引用或配置                                   |
+| ----------------------------------------------------------------------- | ----------------------------------------- |
+| `PythonSSEChatService`                                                  | 后端 URL、`SpatialPerceptionSensor`、启用空间状态开关 |
+| `DialoguePlaybackController`                                            | 同物体的 `AudioSource`、聊天服务、WAV 解码器           |
+| `CharacterPerformanceController`                                        | 播放控制器、嘴型、表情、动作、拼音解析、好感度、脸部特效、凝视控制器        |
+| `SpatialPerceptionSensor`                                               | 玩家 Transform、角色 Root、凝视中心、距离阈值与视觉前向偏移     |
+| `SpatialReactionController`                                             | 传感器、表现控制器、好感系统、可选的播放与凝视控制器                |
+| `ExpressionController` / `BodyMotionController` / `MouthSyncController` | 正确的 Animator 和与 Controller 一致的参数名         |
+| `CharacterFaceEffectController`                                         | 星穹铁道 NPR 渲染控制器；该依赖负责脸红/阴影材质参数             |
 
 脚本中还使用了 `NPinyin` 来取得中文声母。如果迁移到新的 Unity 工程，需要同时导入该库；如果更换渲染方案，脸部特效控制器也需要改为目标模型对应的材质接口。
 
@@ -2482,12 +2481,12 @@ public void SyncFromServer(DialogueStateData stateData)
 
 Unity 端已经能完成流式接收、播放和角色表现，但后续还有很多可以继续打磨的地方：
 
-- 表情和动作之间可以增加更自然的过渡。
-- 口型可以从音量驱动升级到更精细的音素驱动。
-- 空间感知可以加入更多场景事件，比如玩家绕后、长时间凝视、突然靠近。
-- 好感度变化可以有更明确的 UI 反馈。
-- 调试面板可以显示每轮 SSE 原始事件和播放缓冲状态。
-- 角色动作资源可以继续扩充，减少不同情绪复用同一动作的情况。
+* 表情和动作之间可以增加更自然的过渡。
+* 口型可以从音量驱动升级到更精细的音素驱动。
+* 空间感知可以加入更多场景事件，比如玩家绕后、长时间凝视、突然靠近。
+* 好感度变化可以有更明确的 UI 反馈。
+* 调试面板可以显示每轮 SSE 原始事件和播放缓冲状态。
+* 角色动作资源可以继续扩充，减少不同情绪复用同一动作的情况。
 
 ## 总结
 

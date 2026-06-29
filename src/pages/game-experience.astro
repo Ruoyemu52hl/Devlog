@@ -1,16 +1,21 @@
 ---
-import Comment from "@components/comment/index.astro";
 import { PageHeader } from "@components/features/page-header";
 import Markdown from "@components/misc/Markdown.astro";
 
-import AboutContent from "../content/spec/about.md";
+import GameExperienceContent, {
+	frontmatter,
+} from "../content/spec/game-experience.md";
 import MainGridLayout from "../layouts/MainGridLayout.astro";
 
-const title = "关于本站";
+const title =
+	typeof frontmatter.title === "string" ? frontmatter.title : "游戏经历";
+const description =
+	typeof frontmatter.description === "string"
+		? frontmatter.description
+		: "记录玩过的游戏、体验和截图。";
 ---
 
-<MainGridLayout title={title}>
-	<!-- 引入右侧边栏布局管理器 -->
+<MainGridLayout title={title} description={description}>
 	<script>
 		import("../scripts/right-sidebar-layout.js");
 	</script>
@@ -18,16 +23,11 @@ const title = "关于本站";
 		class="flex w-full rounded-[var(--radius-large)] overflow-hidden relative min-h-32"
 	>
 		<div class="card-base z-10 px-9 py-6 relative w-full">
-			<PageHeader title={title} />
+			<PageHeader title={title} subtitle={description} />
 
-			<!-- 从MD文件读取的内容 -->
 			<Markdown class="mt-2">
-				<AboutContent />
+				<GameExperienceContent />
 			</Markdown>
 		</div>
-	</div>
-
-	<div class="mt-4">
-		<Comment path="/about/" />
 	</div>
 </MainGridLayout>

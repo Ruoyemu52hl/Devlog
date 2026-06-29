@@ -1,4 +1,4 @@
-import { collection, config, fields } from "@keystatic/core";
+import { collection, config, fields, singleton } from "@keystatic/core";
 
 export default config({
 	storage: {
@@ -9,7 +9,7 @@ export default config({
 			name: "Mizuki 博客编辑器",
 		},
 		navigation: {
-			内容: ["posts"],
+			内容: ["posts", "gameExperience", "selfIntroduction"],
 		},
 	},
 	collections: {
@@ -108,6 +108,67 @@ export default config({
 				content: fields.mdx({
 					label: "正文",
 					extension: "md",
+				}),
+			},
+		}),
+	},
+	singletons: {
+		gameExperience: singleton({
+			label: "游戏经历",
+			path: "src/content/spec/game-experience",
+			entryLayout: "content",
+			format: {
+				contentField: "content",
+			},
+			schema: {
+				title: fields.text({
+					label: "标题",
+					defaultValue: "游戏经历",
+					validation: {
+						isRequired: true,
+					},
+				}),
+				description: fields.text({
+					label: "简介",
+					multiline: true,
+					defaultValue: "记录玩过的游戏、体验和截图。",
+				}),
+				content: fields.mdx({
+					label: "正文",
+					extension: "md",
+					options: {
+						image: {
+							directory: "public/assets/game-experience",
+							publicPath: "/assets/game-experience/",
+						},
+					},
+				}),
+			},
+		}),
+		selfIntroduction: singleton({
+			label: "自我介绍",
+			path: "src/content/spec/self-introduction",
+			entryLayout: "content",
+			format: {
+				contentField: "content",
+			},
+			schema: {
+				title: fields.text({
+					label: "标题",
+					defaultValue: "自我介绍",
+					validation: {
+						isRequired: true,
+					},
+				}),
+				content: fields.mdx({
+					label: "正文",
+					extension: "md",
+					options: {
+						image: {
+							directory: "public/assets/self-introduction",
+							publicPath: "/assets/self-introduction/",
+						},
+					},
 				}),
 			},
 		}),

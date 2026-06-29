@@ -1,4 +1,4 @@
-这个网站基于 **Astro** 和 [Mizuki](https://github.com/LyraVoid/Mizuki) 主题构建，用来记录技术学习、工程实践和问题排查过程。
+这个网站基于 **Astro** 和 [Mizuki](https://github.com/LyraVoid/Mizuki) 主题构建，用来记录技术学习、工程实践和问题排查过程。以下是原作者的GitHub链接：
 
 ::github{repo="LyraVoid/Mizuki"}
 
@@ -19,5 +19,3 @@
 - 支持代码高亮、数学公式和 Mermaid 图表
 - 支持文章目录、RSS、搜索、标签和分类
 - 支持暗色模式和响应式布局
-
-这个页面后续可以替换成你的个人介绍、技术方向、项目经历或联系方式。

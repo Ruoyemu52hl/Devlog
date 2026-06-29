@@ -211,6 +211,7 @@ export default defineConfig({
 				"marked",
 				"sanitize-html",
 				"qrcode",
+				"@keystatic/core",
 			],
 		},
 		// 预热常用入口文件，让 Vite 在服务器启动后立即开始转换，而不是等到浏览器请求
