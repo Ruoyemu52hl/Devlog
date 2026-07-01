@@ -138,6 +138,11 @@ export const navBarConfig: NavBarConfig = {
       url: "/game-experience/",
       icon: "material-symbols:sports-esports",
     },
+    {
+      name: "游戏拆解",
+      url: "/categories/%E6%B8%B8%E6%88%8F%E6%8B%86%E8%A7%A3/",
+      icon: "material-symbols:analytics",
+    },
 
     // 自定义一级下拉菜单示例：个人内容页面
     {

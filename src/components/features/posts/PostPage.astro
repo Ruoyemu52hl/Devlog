@@ -4,7 +4,8 @@ import { widgetManager } from "../../../utils/widget-manager";
 import PostCard from "./PostCard.astro";
 import type { PostPageProps } from "./types";
 
-const { page }: PostPageProps = Astro.props as PostPageProps;
+const { page, posts }: PostPageProps = Astro.props as PostPageProps;
+const entries = posts ?? page?.data ?? [];
 
 const hasRightSidebars =
 	widgetManager.getComponentsByPosition("top", "right", "desktop").length > 0 ||
@@ -22,7 +23,7 @@ const initialLayoutClass = defaultLayout === "grid" ? "grid-mode" : "list-mode";
 	data-both-sidebars={hasRightSidebars}
 >
 	{
-		page.data.map((entry, index) => (
+		entries.map((entry, index) => (
 			<PostCard
 				entry={entry}
 				class:list="onload-animation"

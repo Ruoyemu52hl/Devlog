@@ -24,5 +24,6 @@ export interface PostMetaProps {
 }
 
 export interface PostPageProps {
-	page: Page<CollectionEntry<"posts">>;
+	page?: Page<CollectionEntry<"posts">>;
+	posts?: CollectionEntry<"posts">[];
 }

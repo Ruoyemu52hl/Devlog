@@ -10,6 +10,7 @@ const categories = await getCategoryList();
 const totalPosts = (await getSortedPostsList()).length;
 const homeUrl = url("/");
 const archiveUrl = url("/archive/");
+const categoriesUrl = url("/categories/");
 ---
 
 <div
@@ -17,6 +18,7 @@ const archiveUrl = url("/archive/");
 	id="category-bar"
 	data-home-path={homeUrl}
 	data-archive-path={archiveUrl}
+	data-categories-path={categoriesUrl}
 >
 	<div class="category-bar-inner flex gap-2">
 		<a
@@ -146,9 +148,20 @@ const archiveUrl = url("/archive/");
 		const archivePath = (
 			bar.getAttribute("data-archive-path") || "/archive"
 		).replace(/\/$/, "");
+		const categoriesPath = (
+			bar.getAttribute("data-categories-path") || "/categories"
+		).replace(/\/$/, "");
 		const isHome =
 			pathname === homePath || pathname === "" || pathname === "/";
 		const isArchive = pathname === archivePath;
+		const isCategoryPage =
+			pathname === categoriesPath ||
+			pathname.startsWith(`${categoriesPath}/`);
+		const pathCategory = isCategoryPage
+			? decodeURIComponent(
+					pathname.slice(categoriesPath.length).replace(/^\/+/, "").split("/")[0] || "",
+				)
+			: "";
 		// 分页页面（如 /2/, /3/）也属于首页的延续
 		const isHomePagination =
 			/^\/\d+$/.test(pathname) ||
@@ -160,7 +173,7 @@ const archiveUrl = url("/archive/");
 				).test(pathname));
 
 		// 在首页、首页分页和归档页显示
-		if (!isHome && !isHomePagination && !isArchive) {
+		if (!isHome && !isHomePagination && !isArchive && !isCategoryPage) {
 			bar.style.display = "none";
 			return;
 		}
@@ -169,7 +182,7 @@ const archiveUrl = url("/archive/");
 		// 高亮当前分类
 		const pills = bar.querySelectorAll<HTMLAnchorElement>(".category-pill");
 		const params = new URLSearchParams(window.location.search);
-		const activeCategory = params.get("category") || "";
+		const activeCategory = params.get("category") || pathCategory;
 		const hasTag = params.has("tag");
 		const hasUncategorized = params.has("uncategorized");
 
@@ -210,7 +223,7 @@ const archiveUrl = url("/archive/");
 		}
 
 		// 更新横幅标题：归档页有分类筛选时显示分类名
-		if (isArchive && activeCategory) {
+		if ((isArchive || isCategoryPage) && activeCategory) {
 			const bannerTitle = document.querySelector(
 				".banner-page-title-text",
 			);

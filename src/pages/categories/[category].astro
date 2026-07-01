@@ -1,0 +1,40 @@
+---
+import CategoryBar from "@components/features/posts/CategoryBar.astro";
+import PostPage from "@components/features/posts/PostPage.astro";
+import I18nKey from "@i18n/i18nKey";
+import { i18n } from "@i18n/translation";
+import MainGridLayout from "@layouts/MainGridLayout.astro";
+import type { CollectionEntry } from "astro:content";
+import type { GetStaticPaths } from "astro";
+
+import { siteConfig } from "../../config";
+import { getCategoryList, getSortedPosts } from "../../utils/content-utils";
+
+const showCategoryBar = siteConfig.postListLayout.categoryBar?.enable ?? false;
+
+export const getStaticPaths = (async () => {
+	const gameAnalysisCategory = "游戏拆解";
+	const categories = new Set(
+		(await getCategoryList()).map((category) => category.name),
+	);
+	categories.add(gameAnalysisCategory);
+
+	return [...categories].map((category) => ({
+		params: { category },
+		props: { category },
+	}));
+}) satisfies GetStaticPaths;
+
+const { category } = Astro.props as { category: string };
+const posts = await getSortedPosts();
+const uncategorized = i18n(I18nKey.uncategorized);
+const categoryPosts: CollectionEntry<"posts">[] =
+	category === uncategorized
+		? posts.filter((post) => !post.data.category)
+		: posts.filter((post) => post.data.category?.trim() === category);
+---
+
+<MainGridLayout title={category} description={`${category}分类文章`}>
+	{showCategoryBar && <CategoryBar />}
+	<PostPage posts={categoryPosts} />
+</MainGridLayout>
